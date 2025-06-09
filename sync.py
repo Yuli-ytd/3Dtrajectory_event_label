@@ -6,10 +6,22 @@ from tqdm import tqdm
 from PyQt5.QtWidgets import (
     QApplication, QLabel, QMainWindow, QGridLayout, QVBoxLayout,
     QWidget, QGroupBox, QSlider, QPushButton, QHBoxLayout,
-    QComboBox, QToolBar, QAction
+    QComboBox, QToolBar, QAction, QSizePolicy
 )
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt, QTimer
+
+class CameraPanel(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.img = QLabel(alignment=Qt.AlignCenter)
+        self.img.setMinimumSize(180, 120)
+        lay = QVBoxLayout(self, spacing=0, margin=0)
+        lay.setContentsMargins(0, 0, 0, 0)  # 去掉邊距
+        lay.addWidget(self.img)
+
+    def set_pixmap(self, pix: QPixmap):
+        self.img.setPixmap(pix)
 
 class VideoSyncViewer(QMainWindow):
     is_updating = False  # lock to prevent overlapping updates
@@ -40,6 +52,15 @@ class VideoSyncViewer(QMainWindow):
 
         # 2. 建 toolbar，先放下拉選單 + Load action
         self.toolbar = QToolBar("Tools")
+        self.toolbar.setStyleSheet("""
+        QToolButton {
+            background: #4d4d4d;
+            color: white;
+            border-radius: 4px;
+            padding: 4px 6px;
+        }
+        QToolButton:hover { background: #666; }
+        """)
         self.addToolBar(self.toolbar)
 
         self.combo = QComboBox()
@@ -159,39 +180,36 @@ class VideoSyncViewer(QMainWindow):
         # old = self.centralWidget()
         # if old:
         #     old.deleteLater()
+        for act in list(self.toolbar.actions()):
+            if act.text().startswith("Rotate Cam") or act.text() in ("Brighten", "Darken"):
+                self.toolbar.removeAction(act)
 
         # Grid of image+text
-        self.labels = []
-        self.text_labels = []
+        # self.labels = []
+        self.panels = []
+        # self.text_labels = []
         layout = QGridLayout()
 
         for i, cam_id in enumerate(self.cam_ids):
+            # Create a panel for each camera
+            
             group = QGroupBox(f"Camera {cam_id}")
-            group_layout = QHBoxLayout(group)
-
-            img_wrapper = QVBoxLayout()
-            text_wrapper = QVBoxLayout()
-
-            img_label = QLabel(self)
-            img_label.setAlignment(Qt.AlignCenter)
-            img_label.setMinimumSize(200, 150)
-
-            text_label = QLabel(self)
-            text_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-            text_label.setWordWrap(True)
-            img_label.setMinimumSize(200, 150)
-
-            # widgets added via layout wrappers
-            img_wrapper.addWidget(img_label)
-            text_wrapper.addWidget(text_label)
-
-            group_layout.addLayout(img_wrapper, 4)
-            group_layout.addLayout(text_wrapper, 1)  # text narrower
+            vbox = QVBoxLayout(group)
+            
+            panel = CameraPanel()
+            vbox.addWidget(panel)
 
             layout.addWidget(group, i // 2, i % 2)
+            self.panels.append(panel)
 
-            self.labels.append(img_label)
-            self.text_labels.append(text_label)
+        tool_box = QWidget()
+        tool_box.setFixedWidth(160)          # 右側寬度
+        tool_layout = QVBoxLayout(tool_box)  # 之後可放自定按鈕、統計、log…
+        tool_layout.addStretch(1)            # 先空白佔位
+
+        wrapper = QHBoxLayout()
+        wrapper.addLayout(layout, stretch=1)
+        wrapper.addWidget(tool_box, stretch=0)
 
         self.status = QLabel(self)
         self.status.setFixedHeight(30)
@@ -201,16 +219,19 @@ class VideoSyncViewer(QMainWindow):
         self.slider.setMaximum(self.max_frames - 1)
         self.slider.setValue(self.frame_idx)
         self.slider.valueChanged.connect(self.on_slider_changed)
+        self.slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.play_button = QPushButton("Play")
         self.play_button.clicked.connect(self.toggle_playback)
 
         control_layout = QHBoxLayout()
-        control_layout.addWidget(self.slider)
+        control_layout.setSpacing(8)
+        control_layout.addWidget(self.slider, 1)
+        # control_layout.addWidget(self.status)
         control_layout.addWidget(self.play_button)
 
         main_layout = QVBoxLayout()
-        main_layout.addLayout(layout)
+        main_layout.addLayout(wrapper, 1)
         main_layout.addWidget(self.status)
         main_layout.addLayout(control_layout)
 
@@ -243,6 +264,17 @@ class VideoSyncViewer(QMainWindow):
   ← : previous frame
   T : toggle tracknet points
 """)
+
+        self.slider.setStyleSheet("""
+        QSlider::handle:horizontal {
+            background: #d6d6d6;       /* 原生灰 */
+            border: 1px solid #5c5c5c; /* 邊框跟預設差不多 */
+            width: 10px;               /* 直徑 10 */
+            height: 10px;
+            border-radius: 5px;        /* 半徑 = 直徑 / 2 → 正圓 */
+            margin: -5px 0;            /* 上下各 -handle/2，讓圓點置中凹槽 */
+        }
+        """)
     
     def rotate_single_camera(self, i):
         self.rotation_angles[i] = (self.rotation_angles[i] + 90) % 360
@@ -269,8 +301,9 @@ class VideoSyncViewer(QMainWindow):
             ts_list = self.timestamps_list[i]
 
             if idx is None:
-                self.labels[i].clear()
-                self.text_labels[i].setText("No match")
+                # self.labels[i].clear()
+                self.panels[i].set_pixmap(QPixmap())  # Clear the image
+                # self.text_labels[i].setText("No match")
                 timestamps_shown.append("None")
                 continue
 
@@ -318,28 +351,31 @@ class VideoSyncViewer(QMainWindow):
 
             # label_size = self.labels[i].size()
             # scaled_pixmap = pixmap.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            w = self.labels[i].width()  or self.labels[i].minimumWidth()
-            h = self.labels[i].height() or self.labels[i].minimumHeight()
+            # w = self.labels[i].width()  or self.labels[i].minimumWidth()
+            # h = self.labels[i].height() or self.labels[i].minimumHeight()
+            w = self.panels[i].img.width() or self.panels[i].img.minimumWidth()
+            h = self.panels[i].img.height() or self.panels[i].img.minimumHeight()
             scaled_pixmap = pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.labels[i].setPixmap(scaled_pixmap)
+            # self.labels[i].setPixmap(scaled_pixmap)
+            self.panels[i].set_pixmap(scaled_pixmap)
 
             ts_value = ts_list[idx]
-            delta_ms = (ts_value - t_ref) * 1000
-            delta_str = f"{delta_ms:+.3f} ms"
+            # delta_ms = (ts_value - t_ref) * 1000
+            # delta_str = f"{delta_ms:+.3f} ms"
 
-            if abs(delta_ms) > 1.0:
-                delta_html = f'<span style="color:red;">Δ: {delta_str}</span>'
-            else:
-                delta_html = f'Δ: {delta_str}'
+            # if abs(delta_ms) > 1.0:
+            #     delta_html = f'<span style="color:red;">Δ: {delta_str}</span>'
+            # else:
+            #     delta_html = f'Δ: {delta_str}'
 
-            self.text_labels[i].setText(
-                f"frame: {idx}<br>ts: {ts_value:.6f}<br>{delta_html}<br>{coords_text}"
-            )
-            self.text_labels[i].setTextFormat(Qt.RichText)
+            # self.text_labels[i].setText(
+            #     f"frame: {idx}<br>ts: {ts_value:.6f}<br>{delta_html}<br>{coords_text}"
+            # )
+            # self.text_labels[i].setTextFormat(Qt.RichText)
 
-            timestamps_shown.append(f"{ts_value:.6f}")
+            timestamps_shown.append(f"{ts_value:.3f}")
 
-        self.status.setText(f"Frame: {self.frame_idx} | Ref Time: {t_ref:.6f} | Matched: {timestamps_shown}")
+        self.status.setText(f"Frame: {self.frame_idx} | Ref Time: {t_ref:.3f} | Matched: {timestamps_shown}")
         self.slider.blockSignals(True)
         self.slider.setValue(self.frame_idx)
         self.slider.blockSignals(False)
