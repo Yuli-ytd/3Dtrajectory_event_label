@@ -1,391 +1,322 @@
-import sys, os
+import sys
+import os
 import pandas as pd
 import cv2
 import numpy as np
 from tqdm import tqdm
 from PyQt5.QtWidgets import (
-    QApplication, QLabel, QMainWindow, QGridLayout, QVBoxLayout,
-    QWidget, QGroupBox, QSlider, QPushButton, QHBoxLayout,
-    QComboBox, QToolBar, QAction, QSizePolicy
+    QApplication,
+    QLabel,
+    QMainWindow,
+    QGridLayout,
+    QVBoxLayout,
+    QWidget,
+    QGroupBox,
+    QSlider,
+    QPushButton,
+    QHBoxLayout,
+    QComboBox,
+    QToolBar,
+    QAction,
+    QSizePolicy
 )
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt, QTimer
 
+
 class CameraPanel(QWidget):
+    """
+    Widget to display a single camera's video frame.
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.img = QLabel(alignment=Qt.AlignCenter)
-        self.img.setMinimumSize(180, 120)
-        lay = QVBoxLayout(self, spacing=0, margin=0)
-        lay.setContentsMargins(0, 0, 0, 0)  # 去掉邊距
-        lay.addWidget(self.img)
+        self.image_label = QLabel(alignment=Qt.AlignCenter)
+        self.image_label.setMinimumSize(180, 120)
 
-    def set_pixmap(self, pix: QPixmap):
-        self.img.setPixmap(pix)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.image_label)
+
+    def set_pixmap(self, pixmap: QPixmap):
+        """Update the panel's image."""
+        self.image_label.setPixmap(pixmap)
+
 
 class VideoSyncViewer(QMainWindow):
-    is_updating = False  # lock to prevent overlapping updates
-    show_tracking = True  # toggle for red dot visibility
+    """
+    Main application window to load and play synchronized camera videos.
+    """
     def __init__(self, base_dir='./Data', sync_tol=0.004166):
         super().__init__()
         self.setWindowTitle("Synchronized Video Viewer")
         self.resize(940, 950)
-        # 讓這個 window 能接收 keyPressEvent
         self.setFocusPolicy(Qt.StrongFocus)
 
-        # # 4. 準備一些屬性
-        self.sync_tol = sync_tol
-        # self.rotation_angles = []
-        # self.brightness = 1.0
-        self.frame_idx = 0  # frame_idx 也可以預設為 0
-        # self.synced_groups = []  # 初始為空，之後在 load_folder 更新
-        self.max_frames = 0
-        self.status = QLabel(self)
-        self.status.setFixedHeight(30)
+        # State flags
+        self.is_updating = False
+        self.show_tracking = True
 
-        # 1. 掃描所有子資料夾
+        # Playback properties
         self.base_dir = base_dir
-        self.folders = [
-            d for d in os.listdir(base_dir)
-            if os.path.isdir(os.path.join(base_dir, d))
-        ]
+        self.sync_tol = sync_tol
+        self.frame_idx = 0
+        self.max_frames = 0
+        self.playing = False
+        self.brightness_factor = 1.0
 
-        # 2. 建 toolbar，先放下拉選單 + Load action
+        # Status display
+        self.status_label = QLabel(self)
+        self.status_label.setFixedHeight(30)
+
+        # Initialize toolbar and UI
+        self._init_toolbar()
+
+    def _init_toolbar(self):
+        """Set up the toolbar with folder selector and initial actions."""
         self.toolbar = QToolBar("Tools")
-        self.toolbar.setStyleSheet("""
-        QToolButton {
-            background: #4d4d4d;
-            color: white;
-            border-radius: 4px;
-            padding: 4px 6px;
-        }
-        QToolButton:hover { background: #666; }
-        """)
+        self.toolbar.setStyleSheet(
+            """
+            QToolButton {
+                background: #4d4d4d;
+                color: white;
+                border-radius: 4px;
+                padding: 4px 6px;
+            }
+            QToolButton:hover { background: #666; }
+            """
+        )
         self.addToolBar(self.toolbar)
 
-        self.combo = QComboBox()
-        self.combo.addItem("Select a folder")
-        self.combo.addItems(self.folders)
-        self.combo.setCurrentIndex(0)
-        self.toolbar.addWidget(self.combo)
+        self.folder_combo = QComboBox()
+        self.folder_combo.addItem("Select a folder")
+        self.folder_combo.addItems(
+            [d for d in os.listdir(self.base_dir)
+             if os.path.isdir(os.path.join(self.base_dir, d))]
+        )
+        self.toolbar.addWidget(self.folder_combo)
 
-        load_act = QAction("Load Folder", self)
-        load_act.triggered.connect(self.on_load_clicked)
-        self.toolbar.addAction(load_act)
+        load_action = QAction("Load Folder", self)
+        load_action.triggered.connect(self.on_load_clicked)
+        self.toolbar.addAction(load_action)
         self.toolbar.addSeparator()
 
-        # 3. 旋轉 & 亮度按鈕，暫時先不初始化 cam_ids 也不會馬上用到
-        # self.rotate_acts = []
-        # self.brighten_act = QAction("Brighten", self, triggered=lambda: self.adjust_brightness(1.1))
-        # self.darken_act   = QAction("Darken",   self, triggered=lambda: self.adjust_brightness(0.9))
-        # toolbar.addAction(self.brighten_act)
-        # toolbar.addAction(self.darken_act)
-
     def on_load_clicked(self):
-        """當按下 Load Folder，可以重複呼叫來重新載入不同資料夾。"""
-        if self.combo.currentIndex() == 0:
+        """Handle 'Load Folder' action."""
+        if self.folder_combo.currentIndex() == 0:
             return
-        folder_name = self.combo.currentText()
+        folder_name = self.folder_combo.currentText()
         folder_path = os.path.join(self.base_dir, folder_name)
         self.load_folder(folder_path)
 
-    def load_folder(self, folder):
-        """讀取 metadata, 影片, tracknet, 並同步成 synced_groups"""
-        self.folder = folder
-        print(f"Loading folder: {self.folder}") 
-        # 相機 ID
-        self.cam_ids = sorted([
-            int(f.split('_')[1])
-            for f in os.listdir(self.folder)
-            if f.startswith('CameraReader_') and f.endswith('_meta.csv')
-        ])[:4]
+    def load_folder(self, folder_path):
+        """Read metadata, load frames, and synchronize across cameras."""
+        meta_files = [f for f in os.listdir(folder_path)
+                      if f.startswith('CameraReader_') and f.endswith('_meta.csv')]
+        self.cam_ids = sorted(int(f.split('_')[1]) for f in meta_files)[:4]
         self.num_cams = len(self.cam_ids)
-        # reset 動態資料結構
+
         self.meta = []
         self.vcaps = []
         self.frame_buffers = [[] for _ in range(self.num_cams)]
         self.timestamps_list = []
-        self.synced_groups = []
         self.track_data = []
+        self.synced_groups = []
         self.frame_idx = 0
-        self.playing = False
+        self.max_frames = 0
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.play_next_frame)
 
-        # 讀取所有 frame & timestamps & track
         for i, cam_id in enumerate(self.cam_ids):
-            df = pd.read_csv(os.path.join(self.folder, f"CameraReader_{cam_id}_meta.csv"))
+            df = pd.read_csv(os.path.join(folder_path, f"CameraReader_{cam_id}_meta.csv"))
             self.meta.append(df)
-            cap = cv2.VideoCapture(os.path.join(self.folder, f"CameraReader_{cam_id}.mp4"))
+            cap = cv2.VideoCapture(os.path.join(folder_path, f"CameraReader_{cam_id}.mp4"))
             self.vcaps.append(cap)
-
             total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             for _ in tqdm(range(total), desc=f"Cam{cam_id}", leave=False):
-                ret, fr = cap.read()
+                ret, frame = cap.read()
                 if not ret:
-                    print(f"Failed to read frame for Camera {cam_id}. Stopping.")
                     break
-                self.frame_buffers[i].append(fr)
+                self.frame_buffers[i].append(frame)
             self.timestamps_list.append(df['timestamp'].tolist())
-
-            track_csv = os.path.join(self.folder, f"TrackNet_{cam_id}.csv")
-            if os.path.exists(track_csv):
-                td = pd.read_csv(track_csv).set_index('Frame')
-            else:
-                td = None
+            track_path = os.path.join(folder_path, f"TrackNet_{cam_id}.csv")
+            td = pd.read_csv(track_path).set_index('Frame') if os.path.exists(track_path) else None
             self.track_data.append(td)
 
-        # 同步
-        cur = [0] * self.num_cams
-        self.synced_groups = []
-        
+        pointers = [0] * self.num_cams
         while True:
-            candidates = []
-            for i in range(self.num_cams):
-                if cur[i] < len(self.timestamps_list[i]):
-                    candidates.append((self.timestamps_list[i][cur[i]], i))
+            candidates = [
+                (self.timestamps_list[i][pointers[i]], i)
+                for i in range(self.num_cams)
+                if pointers[i] < len(self.timestamps_list[i])
+            ]
             if not candidates:
                 break
-            
             ref_ts, _ = min(candidates)
-            print(f"Syncing at reference timestamp: {ref_ts:.6f} seconds")
-            group=[]
-            used=False
+            group = []
+            used = False
             for i in range(self.num_cams):
-                ts_list= self.timestamps_list[i]
-                while cur[i] < len(ts_list) and ts_list[cur[i]] < ref_ts - self.sync_tol:
-                    cur[i] += 1
-
-                # 如果目前這個時間戳在容差範圍內，就視為配對
-                if cur[i] < len(ts_list) and abs(ts_list[cur[i]] - ref_ts) <= self.sync_tol:
-                    group.append(cur[i])
+                ts_list = self.timestamps_list[i]
+                while pointers[i] < len(ts_list) and ts_list[pointers[i]] < ref_ts - self.sync_tol:
+                    pointers[i] += 1
+                if pointers[i] < len(ts_list) and abs(ts_list[pointers[i]] - ref_ts) <= self.sync_tol:
+                    group.append(pointers[i])
                     used = True
-                    cur[i] += 1
+                    pointers[i] += 1
                 else:
                     group.append(None)
-
             if used:
-                self.synced_groups.append((ref_ts,group))
+                self.synced_groups.append((ref_ts, group))
 
         self.max_frames = len(self.synced_groups)
-        print(f"Total synced frames: {self.max_frames}")
-
-        # 建立畫面：labels、slider、status
+        self.rotation_angles = [0] * self.num_cams
+        self.brightness_factor = 1.0
         self.build_ui()
 
     def build_ui(self):
-        """把主畫面重建一次（Grid + slider + 播放按鈕 + 計時器）"""
-        # 清空舊的 central widget
-        # old = self.centralWidget()
-        # if old:
-        #     old.deleteLater()
-        for act in list(self.toolbar.actions()):
-            if act.text().startswith("Rotate Cam") or act.text() in ("Brighten", "Darken"):
-                self.toolbar.removeAction(act)
+        """Construct the main user interface layout."""
+        for action in list(self.toolbar.actions()):
+            txt = action.text()
+            if txt.startswith("Rotate Cam") or txt in ("Brighten", "Darken"):
+                self.toolbar.removeAction(action)
 
-        # Grid of image+text
-        # self.labels = []
         self.panels = []
-        # self.text_labels = []
-        layout = QGridLayout()
-
-        for i, cam_id in enumerate(self.cam_ids):
-            # Create a panel for each camera
-            
-            group = QGroupBox(f"Camera {cam_id}")
-            vbox = QVBoxLayout(group)
-            
+        grid = QGridLayout()
+        for idx, cam_id in enumerate(self.cam_ids):
+            box = QGroupBox(f"Camera {cam_id}")
+            vbox = QVBoxLayout(box)
             panel = CameraPanel()
             vbox.addWidget(panel)
-
-            layout.addWidget(group, i // 2, i % 2)
+            grid.addWidget(box, idx // 2, idx % 2)
             self.panels.append(panel)
 
         tool_box = QWidget()
-        tool_box.setFixedWidth(160)          # 右側寬度
-        tool_layout = QVBoxLayout(tool_box)  # 之後可放自定按鈕、統計、log…
-        tool_layout.addStretch(1)            # 先空白佔位
+        tool_box.setFixedWidth(160)
+        tool_layout = QVBoxLayout(tool_box)
+        tool_layout.addStretch(1)
 
-        wrapper = QHBoxLayout()
-        wrapper.addLayout(layout, stretch=1)
-        wrapper.addWidget(tool_box, stretch=0)
-
-        self.status = QLabel(self)
-        self.status.setFixedHeight(30)
+        main_grid = QHBoxLayout()
+        main_grid.addLayout(grid, 1)
+        main_grid.addWidget(tool_box, 0)
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setMinimum(0)
-        self.slider.setMaximum(self.max_frames - 1)
+        self.slider.setMaximum(max(0, self.max_frames - 1))
         self.slider.setValue(self.frame_idx)
         self.slider.valueChanged.connect(self.on_slider_changed)
         self.slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.slider.setStyleSheet(
+            """
+            QSlider::handle:horizontal {
+                background: #d6d6d6;
+                border: 1px solid #5c5c5c;
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                margin: -5px 0;
+            }
+            """
+        )
 
         self.play_button = QPushButton("Play")
         self.play_button.clicked.connect(self.toggle_playback)
 
-        control_layout = QHBoxLayout()
-        control_layout.setSpacing(8)
-        control_layout.addWidget(self.slider, 1)
-        # control_layout.addWidget(self.status)
-        control_layout.addWidget(self.play_button)
+        control = QHBoxLayout()
+        control.setSpacing(8)
+        control.addWidget(self.slider, 1)
+        control.addWidget(self.play_button)
 
-        main_layout = QVBoxLayout()
-        main_layout.addLayout(wrapper, 1)
-        main_layout.addWidget(self.status)
-        main_layout.addLayout(control_layout)
+        central_layout = QVBoxLayout()
+        central_layout.addLayout(main_grid, 1)
+        central_layout.addWidget(self.status_label)
+        central_layout.addLayout(control)
 
-        central_widget = QWidget()
-        central_widget.setLayout(main_layout)
-        self.setCentralWidget(central_widget)
-
-        self.rotation_angles = [0] * self.num_cams
-        self.brightness_factor = 1.0
+        central = QWidget()
+        central.setLayout(central_layout)
+        self.setCentralWidget(central)
 
         for i, cam_id in enumerate(self.cam_ids):
-            rotate_action = QAction(f"Rotate Cam {cam_id}", self)
-            rotate_action.triggered.connect(lambda checked, idx=i: self.rotate_single_camera(idx))
-            self.toolbar.addAction(rotate_action)
+            act = QAction(f"Rotate Cam {cam_id}", self)
+            act.triggered.connect(lambda _, x=i: self.rotate_single_camera(x))
+            self.toolbar.addAction(act)
+        bright = QAction("Brighten", self)
+        bright.triggered.connect(lambda: self.adjust_brightness(1.1))
+        self.toolbar.addAction(bright)
+        dark = QAction("Darken", self)
+        dark.triggered.connect(lambda: self.adjust_brightness(0.9))
+        self.toolbar.addAction(dark)
 
-        brighten_action = QAction("Brighten", self)
-        brighten_action.triggered.connect(lambda: self.adjust_brightness(1.1))
-        self.toolbar.addAction(brighten_action)
-
-        darken_action = QAction("Darken", self)
-        darken_action.triggered.connect(lambda: self.adjust_brightness(0.9))
-        self.toolbar.addAction(darken_action)
-
-        # QTimer.singleShot(0, self.update_frames)
-        self.update_frames()
-
-        print("""
-[Keys]
-  → : next frame
-  ← : previous frame
-  T : toggle tracknet points
-""")
-
-        self.slider.setStyleSheet("""
-        QSlider::handle:horizontal {
-            background: #d6d6d6;       /* 原生灰 */
-            border: 1px solid #5c5c5c; /* 邊框跟預設差不多 */
-            width: 10px;               /* 直徑 10 */
-            height: 10px;
-            border-radius: 5px;        /* 半徑 = 直徑 / 2 → 正圓 */
-            margin: -5px 0;            /* 上下各 -handle/2，讓圓點置中凹槽 */
-        }
-        """)
-    
-    def rotate_single_camera(self, i):
-        self.rotation_angles[i] = (self.rotation_angles[i] + 90) % 360
-        self.update_frames()
-
-    def adjust_brightness(self, factor):
-        self.brightness_factor *= factor
         self.update_frames()
 
     def update_frames(self):
+        """Render each synchronized frame on its panel."""
         if self.is_updating:
             return
         self.is_updating = True
         if self.frame_idx >= self.max_frames:
-            self.status.setText("No more frames.")
+            self.status_label.setText("No more frames.")
             self.is_updating = False
             return
-
-        t_ref, group_indices = self.synced_groups[self.frame_idx]
-        timestamps_shown = []
-
-        for i in range(self.num_cams):
-            idx = group_indices[i]
-            ts_list = self.timestamps_list[i]
-
+        ref_ts, idxs = self.synced_groups[self.frame_idx]
+        matches = []
+        for i, idx in enumerate(idxs):
+            panel = self.panels[i]
             if idx is None:
-                # self.labels[i].clear()
-                self.panels[i].set_pixmap(QPixmap())  # Clear the image
-                # self.text_labels[i].setText("No match")
-                timestamps_shown.append("None")
+                panel.set_pixmap(QPixmap())
+                matches.append("None")
                 continue
-
-            buffer = self.frame_buffers[i]
-            if idx >= len(buffer):
-                continue
-            frame = buffer[idx]
-
-            # Apply brightness
+            frame = self.frame_buffers[i][idx]
             frame = cv2.convertScaleAbs(frame, alpha=self.brightness_factor, beta=0)
-
-            # Apply rotation
-            angle = self.rotation_angles[i]
-            if angle == 90:
+            ang = self.rotation_angles[i]
+            if ang == 90:
                 frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-            elif angle == 180:
+            elif ang == 180:
                 frame = cv2.rotate(frame, cv2.ROTATE_180)
-            elif angle == 270:
+            elif ang == 270:
                 frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-            coords_text = ""
-
-            # Draw tracking point if available
-            if self.track_data[i] is not None and idx in self.track_data[i].index:
-                row = self.track_data[i].loc[idx]
-                if row['Visibility'] == 1:
-                    x, y = int(row['X']), int(row['Y'])
-                    coords_text = f"X={x}, Y={y}"
-                    if self.show_tracking:
-
-                        angle = self.rotation_angles[i]
-                        if angle == 90:
-                            x, y = frame.shape[1] - y, x
-                        elif angle == 180:
-                            x, y = frame.shape[1] - x, frame.shape[0] - y
-                        elif angle == 270:
-                            x, y = y, frame.shape[0] - x
-
-                        cv2.circle(frame, (x, y), 6, (0, 0, 255), -1)
-
-            rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb_image.shape
-            qt_img = QImage(rgb_image.data, w, h, ch * w, QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qt_img)
-
-            # label_size = self.labels[i].size()
-            # scaled_pixmap = pixmap.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            # w = self.labels[i].width()  or self.labels[i].minimumWidth()
-            # h = self.labels[i].height() or self.labels[i].minimumHeight()
-            w = self.panels[i].img.width() or self.panels[i].img.minimumWidth()
-            h = self.panels[i].img.height() or self.panels[i].img.minimumHeight()
-            scaled_pixmap = pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            # self.labels[i].setPixmap(scaled_pixmap)
-            self.panels[i].set_pixmap(scaled_pixmap)
-
-            ts_value = ts_list[idx]
-            # delta_ms = (ts_value - t_ref) * 1000
-            # delta_str = f"{delta_ms:+.3f} ms"
-
-            # if abs(delta_ms) > 1.0:
-            #     delta_html = f'<span style="color:red;">Δ: {delta_str}</span>'
-            # else:
-            #     delta_html = f'Δ: {delta_str}'
-
-            # self.text_labels[i].setText(
-            #     f"frame: {idx}<br>ts: {ts_value:.6f}<br>{delta_html}<br>{coords_text}"
-            # )
-            # self.text_labels[i].setTextFormat(Qt.RichText)
-
-            timestamps_shown.append(f"{ts_value:.3f}")
-
-        self.status.setText(f"Frame: {self.frame_idx} | Ref Time: {t_ref:.3f} | Matched: {timestamps_shown}")
+            td = self.track_data[i]
+            if td is not None and idx in td.index and td.loc[idx].get('Visibility', 0) == 1 and self.show_tracking:
+                x, y = int(td.loc[idx]['X']), int(td.loc[idx]['Y'])
+                if ang == 90:
+                    x, y = frame.shape[1] - y, x
+                elif ang == 180:
+                    x, y = frame.shape[1] - x, frame.shape[0] - y
+                elif ang == 270:
+                    x, y = y, frame.shape[0] - x
+                cv2.circle(frame, (x, y), 6, (0, 0, 255), -1)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, c = rgb.shape
+            img = QImage(rgb.data, w, h, c * w, QImage.Format_RGB888)
+            pix = QPixmap.fromImage(img)
+            pw = panel.image_label.width() or panel.image_label.minimumWidth()
+            ph = panel.image_label.height() or panel.image_label.minimumHeight()
+            pix = pix.scaled(pw, ph, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            panel.set_pixmap(pix)
+            matches.append(f"{self.timestamps_list[i][idx]:.3f}")
+        self.status_label.setText(f"Frame: {self.frame_idx} | Ref Time: {ref_ts:.3f} | Matched: {matches}")
         self.slider.blockSignals(True)
         self.slider.setValue(self.frame_idx)
         self.slider.blockSignals(False)
         self.is_updating = False
 
-    def on_slider_changed(self, value):
-        self.frame_idx = value
+    def rotate_single_camera(self, idx):
+        """Rotate the specified camera view by 90 degrees."""
+        self.rotation_angles[idx] = (self.rotation_angles[idx] + 90) % 360
+        self.update_frames()
+
+    def adjust_brightness(self, factor):
+        """Adjust global brightness factor."""
+        self.brightness_factor *= factor
+        self.update_frames()
+
+    def on_slider_changed(self, val):
+        """Handle manual slider changes."""
+        self.frame_idx = val
         self.update_frames()
 
     def play_next_frame(self):
+        """Advance playback by one frame."""
         if self.frame_idx < self.max_frames - 1:
             self.frame_idx += 1
             self.update_frames()
@@ -395,6 +326,7 @@ class VideoSyncViewer(QMainWindow):
             self.playing = False
 
     def toggle_playback(self):
+        """Start or pause automatic playback."""
         if self.playing:
             self.timer.stop()
             self.play_button.setText("Play")
@@ -405,23 +337,28 @@ class VideoSyncViewer(QMainWindow):
             self.playing = True
 
     def resizeEvent(self, event):
+        """Ensure frames redraw on window resize."""
+        super().resizeEvent(event)
         self.update_frames()
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_T:
+        """Handle key events for navigation and tracking toggle."""
+        k = event.key()
+        if k == Qt.Key_T:
             self.show_tracking = not self.show_tracking
             self.update_frames()
-            return
-        if event.key() == Qt.Key_Right and self.frame_idx < self.max_frames - 1:
+        elif k == Qt.Key_Right and self.frame_idx < self.max_frames - 1:
             self.frame_idx += 1
             self.update_frames()
-        elif event.key() == Qt.Key_Left and self.frame_idx > 0:
+        elif k == Qt.Key_Left and self.frame_idx > 0:
             self.frame_idx -= 1
             self.update_frames()
+        else:
+            super().keyPressEvent(event)
 
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    win = VideoSyncViewer()
-    win.show()
+    viewer = VideoSyncViewer()
+    viewer.show()
     sys.exit(app.exec_())
