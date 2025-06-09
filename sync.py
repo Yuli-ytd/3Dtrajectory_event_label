@@ -1,73 +1,85 @@
-import sys
-import os
-import argparse
+import sys, os
 import pandas as pd
 import cv2
 import numpy as np
 from tqdm import tqdm
-
 from PyQt5.QtWidgets import (
     QApplication, QLabel, QMainWindow, QGridLayout, QVBoxLayout,
     QWidget, QGroupBox, QSlider, QPushButton, QHBoxLayout,
-    QComboBox, QPushButton
+    QComboBox, QToolBar, QAction
 )
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt, QTimer
 
-
-from PyQt5.QtWidgets import QToolBar, QAction
-
-class VideoSyncApp(QMainWindow):
-    def __init__(self, base_dir='./Data'):
+class VideoSyncViewer(QMainWindow):
+    is_updating = False  # lock to prevent overlapping updates
+    show_tracking = True  # toggle for red dot visibility
+    def __init__(self, base_dir='./Data', sync_tol=0.004166):
         super().__init__()
         self.setWindowTitle("Synchronized Video Viewer")
-        # Scan the subfolders in the base directory
-        self.available_folders = [
+        self.resize(940, 950)
+        # 讓這個 window 能接收 keyPressEvent
+        self.setFocusPolicy(Qt.StrongFocus)
+
+        # # 4. 準備一些屬性
+        self.sync_tol = sync_tol
+        # self.rotation_angles = []
+        # self.brightness = 1.0
+        self.frame_idx = 0  # frame_idx 也可以預設為 0
+        # self.synced_groups = []  # 初始為空，之後在 load_folder 更新
+        self.max_frames = 0
+        self.status = QLabel(self)
+        self.status.setFixedHeight(30)
+
+        # 1. 掃描所有子資料夾
+        self.base_dir = base_dir
+        self.folders = [
             d for d in os.listdir(base_dir)
             if os.path.isdir(os.path.join(base_dir, d))
         ]
 
-        # Create a dropdown to select the folder
-        self.combo = QComboBox()
-        self.combo.addItems(self.available_folders)
-        self.load_btn = QPushButton("Load Folder")
-        self.load_btn.clicked.connect(self.on_load_clicked)
+        # 2. 建 toolbar，先放下拉選單 + Load action
+        self.toolbar = QToolBar("Tools")
+        self.addToolBar(self.toolbar)
 
-        # Create a layout for the main window
-        top_layout = QHBoxLayout()
-        top_layout.addWidget(self.combo)
-        top_layout.addWidget(self.load_btn)
-        container = QWidget()
-        container.setLayout(top_layout)
-        self.setCentralWidget(container)
+        self.combo = QComboBox()
+        self.combo.addItem("Select a folder")
+        self.combo.addItems(self.folders)
+        self.combo.setCurrentIndex(0)
+        self.toolbar.addWidget(self.combo)
+
+        load_act = QAction("Load Folder", self)
+        load_act.triggered.connect(self.on_load_clicked)
+        self.toolbar.addAction(load_act)
+        self.toolbar.addSeparator()
+
+        # 3. 旋轉 & 亮度按鈕，暫時先不初始化 cam_ids 也不會馬上用到
+        # self.rotate_acts = []
+        # self.brighten_act = QAction("Brighten", self, triggered=lambda: self.adjust_brightness(1.1))
+        # self.darken_act   = QAction("Darken",   self, triggered=lambda: self.adjust_brightness(0.9))
+        # toolbar.addAction(self.brighten_act)
+        # toolbar.addAction(self.darken_act)
 
     def on_load_clicked(self):
+        """當按下 Load Folder，可以重複呼叫來重新載入不同資料夾。"""
+        if self.combo.currentIndex() == 0:
+            return
         folder_name = self.combo.currentText()
-        folder_path = os.path.join('./Data', folder_name)
+        folder_path = os.path.join(self.base_dir, folder_name)
+        self.load_folder(folder_path)
 
-        # Create an instance of the VideoSyncViewer with the selected folder
-        self.viewer = VideoSyncViewer(folder_path)
-        self.setCentralWidget(self.viewer) # Replace the central widget with the viewer
-
-
-class VideoSyncViewer(QMainWindow):
-    
-    is_updating = False  # lock to prevent overlapping updates
-    show_tracking = True  # toggle for red dot visibility
-
-    def __init__(self, folder, sync_tolerance=0.004166):
-        super().__init__()
+    def load_folder(self, folder):
+        """讀取 metadata, 影片, tracknet, 並同步成 synced_groups"""
         self.folder = folder
+        print(f"Loading folder: {self.folder}") 
+        # 相機 ID
         self.cam_ids = sorted([
-            int(name.split('_')[1])
-            for name in os.listdir(folder)
-            if name.startswith('CameraReader_') and name.endswith('_meta.csv')
-        ])[:4] # limited to 4 camera
+            int(f.split('_')[1])
+            for f in os.listdir(self.folder)
+            if f.startswith('CameraReader_') and f.endswith('_meta.csv')
+        ])[:4]
         self.num_cams = len(self.cam_ids)
-        self.sync_tolerance = sync_tolerance
-        self.setWindowTitle("Synchronized Video Viewer")
-        self.resize(940, 950)
-
+        # reset 動態資料結構
         self.meta = []
         self.vcaps = []
         self.frame_buffers = [[] for _ in range(self.num_cams)]
@@ -80,65 +92,75 @@ class VideoSyncViewer(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.play_next_frame)
 
-        # Initialize data structures
+        # 讀取所有 frame & timestamps & track
         for i, cam_id in enumerate(self.cam_ids):
-            # Read metadata and video capture for each camera
-            df = pd.read_csv(os.path.join(folder, f"CameraReader_{cam_id}_meta.csv"))
+            df = pd.read_csv(os.path.join(self.folder, f"CameraReader_{cam_id}_meta.csv"))
             self.meta.append(df)
-            cap = cv2.VideoCapture(os.path.join(folder, f"CameraReader_{cam_id}.mp4"))
+            cap = cv2.VideoCapture(os.path.join(self.folder, f"CameraReader_{cam_id}.mp4"))
             self.vcaps.append(cap)
 
-            # Read all frames of the ith camera into its buffer
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            for _ in tqdm(range(total_frames), desc=f"Reading frames for Camera {cam_id}", leave=False):
-                ret, frame = cap.read()
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            for _ in tqdm(range(total), desc=f"Cam{cam_id}", leave=False):
+                ret, fr = cap.read()
                 if not ret:
+                    print(f"Failed to read frame for Camera {cam_id}. Stopping.")
                     break
-                self.frame_buffers[i].append(frame)
+                self.frame_buffers[i].append(fr)
             self.timestamps_list.append(df['timestamp'].tolist())
 
-            # Read trackNet points if the file exists
-            track_path = os.path.join(folder, f"TrackNet_{cam_id}.csv")
-            if os.path.exists(track_path):
-                track_df = pd.read_csv(track_path)
-                self.track_data.append(track_df.set_index('Frame'))
+            track_csv = os.path.join(self.folder, f"TrackNet_{cam_id}.csv")
+            if os.path.exists(track_csv):
+                td = pd.read_csv(track_csv).set_index('Frame')
             else:
-                self.track_data.append(None)
+                td = None
+            self.track_data.append(td)
 
-        cur = [0] * self.num_cams # current frame index for each camera
+        # 同步
+        cur = [0] * self.num_cams
+        self.synced_groups = []
+        
         while True:
-            current_ts = [] # current timestamps for each camera
+            candidates = []
             for i in range(self.num_cams):
                 if cur[i] < len(self.timestamps_list[i]):
-                    current_ts.append((self.timestamps_list[i][cur[i]], i))
-            if not current_ts:
+                    candidates.append((self.timestamps_list[i][cur[i]], i))
+            if not candidates:
                 break
-
-            ref_ts, _ = min(current_ts)
-            group = []
-            used = False
+            
+            ref_ts, _ = min(candidates)
+            print(f"Syncing at reference timestamp: {ref_ts:.6f} seconds")
+            group=[]
+            used=False
             for i in range(self.num_cams):
-                ts_list = self.timestamps_list[i]
-                while cur[i] < len(ts_list):
-                    diff = abs(ts_list[cur[i]] - ref_ts) # time difference between current and reference timestamp
-                    if diff <= self.sync_tolerance:
-                        group.append(cur[i])
-                        cur[i] += 1
-                        used = True
-                        break
-                    elif ts_list[cur[i]] < ref_ts: # if the current timestamp is less than the reference
-                        cur[i] += 1 # move to the next timestamp
-                    else:
-                        group.append(None) # no match found
-                        break
+                ts_list= self.timestamps_list[i]
+                while cur[i] < len(ts_list) and ts_list[cur[i]] < ref_ts - self.sync_tol:
+                    cur[i] += 1
+
+                # 如果目前這個時間戳在容差範圍內，就視為配對
+                if cur[i] < len(ts_list) and abs(ts_list[cur[i]] - ref_ts) <= self.sync_tol:
+                    group.append(cur[i])
+                    used = True
+                    cur[i] += 1
                 else:
-                    group.append(None) # no match found
-            if used:# at least one camera matched the reference timestamp
-                self.synced_groups.append((ref_ts, group))
-        # the number of frames in the synced groups
+                    group.append(None)
+
+            if used:
+                self.synced_groups.append((ref_ts,group))
+
         self.max_frames = len(self.synced_groups)
-        
-        # Initialize GUI components
+        print(f"Total synced frames: {self.max_frames}")
+
+        # 建立畫面：labels、slider、status
+        self.build_ui()
+
+    def build_ui(self):
+        """把主畫面重建一次（Grid + slider + 播放按鈕 + 計時器）"""
+        # 清空舊的 central widget
+        # old = self.centralWidget()
+        # if old:
+        #     old.deleteLater()
+
+        # Grid of image+text
         self.labels = []
         self.text_labels = []
         layout = QGridLayout()
@@ -196,34 +218,32 @@ class VideoSyncViewer(QMainWindow):
         central_widget.setLayout(main_layout)
         self.setCentralWidget(central_widget)
 
-        # Toolbar for image adjustments
-        toolbar = QToolBar("Tools")
-        self.addToolBar(toolbar)
-
         self.rotation_angles = [0] * self.num_cams
         self.brightness_factor = 1.0
 
         for i, cam_id in enumerate(self.cam_ids):
             rotate_action = QAction(f"Rotate Cam {cam_id}", self)
             rotate_action.triggered.connect(lambda checked, idx=i: self.rotate_single_camera(idx))
-            toolbar.addAction(rotate_action)
+            self.toolbar.addAction(rotate_action)
 
         brighten_action = QAction("Brighten", self)
         brighten_action.triggered.connect(lambda: self.adjust_brightness(1.1))
-        toolbar.addAction(brighten_action)
+        self.toolbar.addAction(brighten_action)
 
         darken_action = QAction("Darken", self)
         darken_action.triggered.connect(lambda: self.adjust_brightness(0.9))
-        toolbar.addAction(darken_action)
+        self.toolbar.addAction(darken_action)
 
-        QTimer.singleShot(0, self.update_frames)
+        # QTimer.singleShot(0, self.update_frames)
+        self.update_frames()
+
         print("""
 [Keys]
   → : next frame
   ← : previous frame
   T : toggle tracknet points
 """)
-
+    
     def rotate_single_camera(self, i):
         self.rotation_angles[i] = (self.rotation_angles[i] + 90) % 360
         self.update_frames()
@@ -238,6 +258,7 @@ class VideoSyncViewer(QMainWindow):
         self.is_updating = True
         if self.frame_idx >= self.max_frames:
             self.status.setText("No more frames.")
+            self.is_updating = False
             return
 
         t_ref, group_indices = self.synced_groups[self.frame_idx]
@@ -295,8 +316,11 @@ class VideoSyncViewer(QMainWindow):
             qt_img = QImage(rgb_image.data, w, h, ch * w, QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qt_img)
 
-            label_size = self.labels[i].size()
-            scaled_pixmap = pixmap.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            # label_size = self.labels[i].size()
+            # scaled_pixmap = pixmap.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            w = self.labels[i].width()  or self.labels[i].minimumWidth()
+            h = self.labels[i].height() or self.labels[i].minimumHeight()
+            scaled_pixmap = pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.labels[i].setPixmap(scaled_pixmap)
 
             ts_value = ts_list[idx]
@@ -361,15 +385,7 @@ class VideoSyncViewer(QMainWindow):
 
 
 if __name__ == '__main__':
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument('--dir', type=str, required=True, help='Path to folder containing video and CSV files')
-    # args = parser.parse_args()
-
-    # app = QApplication(sys.argv)
-    # viewer = VideoSyncViewer(args.dir)
-    # viewer.show()
-    # sys.exit(app.exec_())
     app = QApplication(sys.argv)
-    main_win = VideoSyncApp()
-    main_win.show()
+    win = VideoSyncViewer()
+    win.show()
     sys.exit(app.exec_())
