@@ -8,7 +8,8 @@ from tqdm import tqdm
 
 from PyQt5.QtWidgets import (
     QApplication, QLabel, QMainWindow, QGridLayout, QVBoxLayout,
-    QWidget, QGroupBox, QSlider, QPushButton, QHBoxLayout
+    QWidget, QGroupBox, QSlider, QPushButton, QHBoxLayout,
+    QComboBox, QPushButton
 )
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt, QTimer
@@ -16,9 +17,44 @@ from PyQt5.QtCore import Qt, QTimer
 
 from PyQt5.QtWidgets import QToolBar, QAction
 
+class VideoSyncApp(QMainWindow):
+    def __init__(self, base_dir='./Data'):
+        super().__init__()
+        self.setWindowTitle("Synchronized Video Viewer")
+        # Scan the subfolders in the base directory
+        self.available_folders = [
+            d for d in os.listdir(base_dir)
+            if os.path.isdir(os.path.join(base_dir, d))
+        ]
+
+        # Create a dropdown to select the folder
+        self.combo = QComboBox()
+        self.combo.addItems(self.available_folders)
+        self.load_btn = QPushButton("Load Folder")
+        self.load_btn.clicked.connect(self.on_load_clicked)
+
+        # Create a layout for the main window
+        top_layout = QHBoxLayout()
+        top_layout.addWidget(self.combo)
+        top_layout.addWidget(self.load_btn)
+        container = QWidget()
+        container.setLayout(top_layout)
+        self.setCentralWidget(container)
+
+    def on_load_clicked(self):
+        folder_name = self.combo.currentText()
+        folder_path = os.path.join('./Data', folder_name)
+
+        # Create an instance of the VideoSyncViewer with the selected folder
+        self.viewer = VideoSyncViewer(folder_path)
+        self.setCentralWidget(self.viewer) # Replace the central widget with the viewer
+
+
 class VideoSyncViewer(QMainWindow):
+    
     is_updating = False  # lock to prevent overlapping updates
     show_tracking = True  # toggle for red dot visibility
+
     def __init__(self, folder, sync_tolerance=0.004166):
         super().__init__()
         self.folder = folder
@@ -99,9 +135,10 @@ class VideoSyncViewer(QMainWindow):
                     group.append(None) # no match found
             if used:# at least one camera matched the reference timestamp
                 self.synced_groups.append((ref_ts, group))
-        # the number of cameras in the synced groups
+        # the number of frames in the synced groups
         self.max_frames = len(self.synced_groups)
-
+        
+        # Initialize GUI components
         self.labels = []
         self.text_labels = []
         layout = QGridLayout()
@@ -324,11 +361,15 @@ class VideoSyncViewer(QMainWindow):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--dir', type=str, required=True, help='Path to folder containing video and CSV files')
-    args = parser.parse_args()
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument('--dir', type=str, required=True, help='Path to folder containing video and CSV files')
+    # args = parser.parse_args()
 
+    # app = QApplication(sys.argv)
+    # viewer = VideoSyncViewer(args.dir)
+    # viewer.show()
+    # sys.exit(app.exec_())
     app = QApplication(sys.argv)
-    viewer = VideoSyncViewer(args.dir)
-    viewer.show()
+    main_win = VideoSyncApp()
+    main_win.show()
     sys.exit(app.exec_())
