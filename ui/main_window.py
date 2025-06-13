@@ -1,0 +1,312 @@
+import os
+from PyQt5.QtWidgets import (
+    QLabel, QMainWindow, QGridLayout,
+    QVBoxLayout, QWidget, QGroupBox, QSlider,
+    QPushButton, QHBoxLayout, QComboBox, QToolBar,
+    QAction, QSizePolicy
+)
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont
+from ui.camera_panel import CameraPanel
+from controllers.playback_controller import PlaybackController
+from loaders.sync_manager import AllCamerasInfo, load_all_cameras_data
+
+class MainWindow(QMainWindow):
+    def __init__(self, base_dir = "./Data", sync_tol = 0.004166):
+        super().__init__()
+        self.base_dir = base_dir
+        self.sync_tol = sync_tol
+        self.control = None
+
+        self.setWindowTitle("3D Trajectory Event Labeling Tool")
+        self.resize(940,950)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+        # Initialize the main layout:
+        self.status_label = QLabel(self)
+        self.status_label.setFixedHeight(20)
+
+        # toolbar
+        self._init_toolbar()
+
+    def _init_toolbar(self):
+
+        # Create the toolbar and set its style
+        self.toolbar = QToolBar("Tools")
+        self.toolbar.setStyleSheet(
+            """
+            QToolBar {
+                background: #4d4d4d;
+                color: white;
+                border-radius: 4px;
+                padding: 4px 6px;
+            }
+            
+            QToolButton:hover {
+                background: #666;
+            }
+            """
+        )
+        self.addToolBar(self.toolbar)
+
+        # Create the folder selection action
+        self.folder_combo = QComboBox()
+        self.folder_combo.addItem("Select a folder")
+        self.folder_combo.addItems(
+            [d for d in os.listdir(self.base_dir) 
+             if os.path.isdir(os.path.join(self.base_dir, d))]
+        )
+        self.toolbar.addWidget(self.folder_combo)
+
+        # Create the load action
+        self.load_action = QAction("Load Data", self)
+        self.load_action.triggered.connect(self.on_load_clicked)
+        self.toolbar.addAction(self.load_action)
+        self.toolbar.addSeparator()
+
+    def on_load_clicked(self):
+        if self.folder_combo.currentIndex() == 0:
+            self.status_label.setText("Please select a folder to load data.")
+            return
+
+        folder_path = os.path.join(self.base_dir, self.folder_combo.currentText())
+        
+        # Load all camera data
+        info = load_all_cameras_data(folder_path, self.sync_tol)
+        
+        # Build the main window with the loaded data
+        self._build_central_widget(info)
+
+        # Set playback controller
+        self.control = PlaybackController(
+            cameras_info=info,
+            status_label=self.status_label,
+            panels=self.panels,
+            slider=self.slider,
+            play_button=self.play_button,
+            output_dir=folder_path
+        )
+
+        # Connect toolbar actions to the playback controller
+        self._bind_toolbar_actions(info.cam_ids)
+
+        # Set the initial frame index and max frames
+        self._on_frame_changed(self.slider.value())
+        self.control.update_frames()
+
+    def _build_central_widget(self, info: AllCamerasInfo):
+        
+        # Panels
+        self.panels = []
+        grid = QGridLayout()
+        for idx, cam_id in enumerate(info.cam_ids):
+            box = QGroupBox(f"Camera {cam_id}")
+            vbox = QVBoxLayout(box)
+            panel = CameraPanel()
+            panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            vbox.addWidget(panel)
+            grid.addWidget(box, idx // 2, idx % 2)
+            self.panels.append(panel)
+
+        # Labeling tool box
+        tool_box = self._build_labeling_toolbox()
+
+        main_grid = QHBoxLayout()
+        main_grid.addLayout(grid, 1)
+        main_grid.addWidget(tool_box, 0)
+
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(0, max(0, info.max_frames - 1))
+        self.slider.setValue(info.frame_idx)
+        self.slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.slider.setStyleSheet(
+            """
+            QSlider::handle:horizontal {
+                background: #d6d6d6;
+                border: 1px solid #5c5c5c;
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                margin: -5px 0;
+            }
+            """
+        )
+        self.slider.valueChanged.connect(self._on_frame_changed)
+
+        self.play_button = QPushButton("Play")
+
+        control_bar = QHBoxLayout()
+        control_bar.setSpacing(8)
+        control_bar.addWidget(self.slider, 1)
+        control_bar.addWidget(self.play_button)
+
+        central_layout = QVBoxLayout()
+        central_layout.addLayout(main_grid, 1)
+        central_layout.addWidget(self.status_label)
+        central_layout.addLayout(control_bar)
+
+        central = QWidget()
+        central.setLayout(central_layout)
+        self.setCentralWidget(central)
+
+    def _build_labeling_toolbox(self):
+        
+        tool_box = QWidget()
+        tool_layout = QVBoxLayout(tool_box)
+        tool_layout.setContentsMargins(10, 10, 10, 10)
+        tool_layout.setSpacing(40)
+        tool_box.setFixedWidth(200)
+        tool_layout.addStretch(1)
+
+        # Event buttons
+        self.event_box = QGroupBox("Event")
+        self.event_box.setFont(QFont("", 20, QFont.Bold))
+        event_layout = QVBoxLayout()
+        self.event_buttons = {}
+        self.current_allowed_btn = {"serve", "rest-hit"} # Record the current allowed events for the next frame
+        events = [("serve", "Serve"), ("hit", "Hit"), 
+                  ("touch", "Touch"), ("dead", "Dead"), 
+                  ("rest-hit", "Rest\nHit"), ("rest-dead","Rest\nDead")
+                  ]
+        
+        for key, label in events:
+            btn = QPushButton(label)
+            btn.setFont(QFont("", 18))
+            btn.setFixedHeight(55)
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _, k=key: self._on_event_clicked(k))
+            event_layout.addWidget(btn)
+            self.event_buttons[key] = btn
+            if key not in ["serve", "rest-hit"]:
+                btn.setEnabled(False)
+
+        self.event_box.setLayout(event_layout)
+        tool_layout.addWidget(self.event_box)
+
+        # Save
+        tool_layout.addStretch(1)
+        self.save_button = QPushButton("Save")
+        self.save_button.setFont(QFont("", 20, QFont.Bold))
+        self.save_button.setFixedHeight(50)
+        self.save_button.setFixedWidth(100)
+        # put the save button at middle position
+        self.save_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        # self.save_button.clicked.connect(lambda: self.control.save_annotations())
+        tool_layout.addWidget(self.save_button)
+        
+        return tool_box
+
+    def _bind_toolbar_actions(self, cam_idx):
+        # Rotation action
+        for i, cam_id in enumerate(cam_idx):
+            action = QAction(f"Rotate Cam {cam_id}", self)
+            action.triggered.connect(lambda _, idx=i: self.control.rotate_single_camera(idx))
+            self.toolbar.addAction(action)
+        
+        # Brighten / Darken action
+        for factor, label in ((1.1, "Brighten"), (0.9, "Darken")):
+            action = QAction(label, self)
+            action.triggered.connect(lambda _, f=factor: self.control.adjust_brightness(f))
+            self.toolbar.addAction(action)
+
+    def _on_event_clicked(self, event_type:str):
+        if not self.control: 
+            return
+        
+        # Check if the button is already checked
+        btn = self.event_buttons[event_type]
+        checked = btn.isChecked()
+
+        self.control.record_event(event_type)
+        # If the button is unchecked, we just update the frame
+        if not checked:
+            self._on_frame_changed(self.control.info.frame_idx)
+            return
+
+        # If the button is checked, we need to disable other buttons
+        if event_type in ("hit","touch","dead"):
+            for e in ("hit","touch","dead"):
+                self.event_buttons[e].setEnabled(e == event_type)
+        elif event_type == "rest-hit":
+            self.event_buttons["rest-dead"].setEnabled(False)
+        elif event_type == "rest-dead":
+            self.event_buttons["rest-hit"].setEnabled(False)
+        elif event_type == "serve":
+            self.event_buttons["rest-hit"].setEnabled(False)
+        elif event_type == "rest-hit":
+            self.event_buttons["serve"].setEnabled(False)
+    
+    def _compute_allowed_events(self, prev_fid: int):
+        
+        initial = {"serve", "rest-hit"}
+
+        if prev_fid < 0:
+            return initial
+        
+        prev_events = self.control.annot.get_events_for_frame(prev_fid)
+        if prev_events:
+            prev_event_type = prev_events[-1]["event_type"]
+            if prev_event_type == "serve":
+                return {"hit", "touch", "dead"}
+            elif prev_event_type in {"hit", "touch"}:
+                return {"hit", "touch", "dead"}
+            elif prev_event_type == "rest-hit":
+                return {"rest-hit", "rest-dead"}
+            return  initial
+        return self.current_allowed_btn
+    
+    def _on_frame_changed(self, fid: int):
+
+        if not self.control:
+            return
+        
+        prev_fid = fid - 1
+        allowed = self._compute_allowed_events(prev_fid)
+
+        for _, btn in self.event_buttons.items():
+            btn.setEnabled(False)
+            btn.setChecked(False)
+
+        for key in allowed:
+            self.event_buttons[key].setEnabled(True)
+
+        # If the frame is annotated, show the checked state
+        current_events = self.control.annot.get_events_for_frame(fid)
+        for event in current_events:
+            event_type = event["event_type"]
+            if event_type in self.event_buttons:
+                self.event_buttons[event_type].setChecked(True)
+
+        # Update the allowed events for the next frame        
+        self.current_allowed_btn = allowed
+        
+        self.control.update_frames()
+    
+    def resizeEvent(self, event):
+        """Ensure frames redraw on window resize."""
+        super().resizeEvent(event)
+        if self.control is not None:
+            self.control.update_frames()
+
+    def keyPressEvent(self, event):
+        """Handle key events for navigation and tracking toggle."""
+        if self.control is None:
+            return super().keyPressEvent(event)
+        
+        k = event.key()
+        if k == Qt.Key_T:
+            self.control.show_tracknet = not self.control.show_tracknet
+            self.control.update_frames()
+        elif k == Qt.Key_Right and self.control.info.frame_idx < self.control.info.max_frames - 1:
+            new_fid = self.control.info.frame_idx + 1
+            self.control.info.frame_idx = new_fid
+            self.slider.setValue(new_fid)
+            self.control.update_frames()
+        elif k == Qt.Key_Left and self.control.info.frame_idx > 0:
+            new_fid = self.control.info.frame_idx - 1
+            self.control.info.frame_idx = new_fid
+            self.slider.setValue(new_fid)
+            self.control.update_frames()
+        else:
+            super().keyPressEvent(event)
+        
