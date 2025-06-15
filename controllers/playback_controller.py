@@ -27,7 +27,7 @@ class PlaybackController:
         self.timer.timeout.connect(self.play_next_frame)
 
         # create annotation controller
-        self.annot = AnnotationController(output_dir)
+        self.annot = AnnotationController(output_dir, self.info.synced_groups[0][0])
         
         # ui event connections
         self.slider.valueChanged.connect(self.on_slider_changed)
@@ -110,6 +110,7 @@ class PlaybackController:
                 panel.set_pixmap(pix)
                 ts = self.info.timestamps[cam_id][idx]
                 matches.append(f"{ts:.3f}")
+                
         
         # self.status_label.setText(f"Frame: {self.info.frame_idx} | Ref Time: {ref_time:.3f} | Matched: {matches}")
         self.status_label.setText(f"Frame: {self.info.frame_idx} | Ref Time: {ref_time:.3f}")

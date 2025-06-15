@@ -69,6 +69,11 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Please select a folder to load data.")
             return
 
+        # if the selected folder is same as the current one, do nothing
+        if hasattr(self, 'folder_path') and self.folder_path == self.folder_combo.currentText():
+            self.status_label.setText("Data already loaded.")
+            return
+
         folder_path = os.path.join(self.base_dir, self.folder_combo.currentText())
         
         # Load all camera data
@@ -89,6 +94,9 @@ class MainWindow(QMainWindow):
 
         # Connect toolbar actions to the playback controller
         self._bind_toolbar_actions(info.cam_ids)
+
+        # Connect the save button to the controller
+        self.save_button.clicked.connect(self.control.save_annotations)
 
         # Set the initial frame index and max frames
         self._on_frame_changed(self.slider.value())
@@ -191,7 +199,6 @@ class MainWindow(QMainWindow):
         self.save_button.setFixedWidth(100)
         # put the save button at middle position
         self.save_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        # self.save_button.clicked.connect(lambda: self.control.save_annotations())
         tool_layout.addWidget(self.save_button)
         
         return tool_box
@@ -237,13 +244,14 @@ class MainWindow(QMainWindow):
             self.event_buttons["serve"].setEnabled(False)
     
     def _compute_allowed_events(self, prev_fid: int):
-        
+
         initial = {"serve", "rest-hit"}
 
         if prev_fid < 0:
             return initial
         
-        prev_events = self.control.annot.get_events_for_frame(prev_fid)
+        prev_events = self.control.annot.by_frame.get(prev_fid, [])
+        print(f"Previous events for frame {prev_fid}: {prev_events}")
         if prev_events:
             prev_event_type = prev_events[-1]["event_type"]
             if prev_event_type == "serve":
@@ -253,32 +261,40 @@ class MainWindow(QMainWindow):
             elif prev_event_type == "rest-hit":
                 return {"rest-hit", "rest-dead"}
             return  initial
+                    
         return self.current_allowed_btn
     
     def _on_frame_changed(self, fid: int):
 
         if not self.control:
             return
-        
-        prev_fid = fid - 1
-        allowed = self._compute_allowed_events(prev_fid)
-
-        for _, btn in self.event_buttons.items():
-            btn.setEnabled(False)
-            btn.setChecked(False)
-
-        for key in allowed:
-            self.event_buttons[key].setEnabled(True)
 
         # If the frame is annotated, show the checked state
-        current_events = self.control.annot.get_events_for_frame(fid)
-        for event in current_events:
-            event_type = event["event_type"]
-            if event_type in self.event_buttons:
-                self.event_buttons[event_type].setChecked(True)
+        current_events = self.control.annot.by_frame.get(fid, [])
+        if current_events and fid == int(current_events[-1]["fid"]):
+            print(f"Current events for frame {fid}: {current_events}")
+            self.current_allowed_btn = {current_events[-1]["event_type"]}
+            for _, btn in self.event_buttons.items():
+                btn.setEnabled(False)
+                btn.setChecked(False)
+            self.event_buttons[current_events[-1]["event_type"]].setEnabled(True)
+            self.event_buttons[current_events[-1]["event_type"]].setChecked(True)
+            return
 
-        # Update the allowed events for the next frame        
-        self.current_allowed_btn = allowed
+        # If the frame is not annotated, compute the allowed events
+        else:
+            closest_annotated_frame = self.control.annot.get_events_for_frame(fid)
+            allowed = self._compute_allowed_events(closest_annotated_frame)
+
+            for _, btn in self.event_buttons.items():
+                btn.setEnabled(False)
+                btn.setChecked(False)
+
+            for key in allowed:
+                self.event_buttons[key].setEnabled(True)
+
+            # Update the allowed events for the next frame        
+            self.current_allowed_btn = allowed
         
         self.control.update_frames()
     
