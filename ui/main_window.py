@@ -251,7 +251,7 @@ class MainWindow(QMainWindow):
             return initial
         
         prev_events = self.control.annot.by_frame.get(prev_fid, [])
-        print(f"Previous events for frame {prev_fid}: {prev_events}")
+        # print(f"Previous events for frame {prev_fid}: {prev_events}")
         if prev_events:
             prev_event_type = prev_events[-1]["event_type"]
             if prev_event_type == "serve":

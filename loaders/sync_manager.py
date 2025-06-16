@@ -24,20 +24,28 @@ def build_synced_groups(timestamps: list[list], cam_nums: int, sync_tol: float =
     sync = []
     pointers = [0] * cam_nums
     while True:
+        # collect candidates from all cameras, each candidate is a tuple of (timestamp of a frame, camera index)
         candidates = [(timestamps[i][pointers[i]], i) 
                       for i in range(cam_nums) 
                       if pointers[i] < len(timestamps[i])]
+        # all the frames are used
         if not candidates:
             break
-
+        
+        # use the minimum timestamp of the candidates as the reference time
         ref_time, _ = min(candidates)
         group = []
         used = False
 
         for cam in range(cam_nums):
+            # get the timestamp list for the current camera
             ts_list = timestamps[cam]
+
+            # check if the current timestamp of the camera is too old, fix the pointer if so
             while pointers[cam] < len(ts_list) and ts_list[pointers[cam]] < ref_time - sync_tol:
                 pointers[cam] += 1
+
+            # if the current timestamp is within the sync tolerance, add it to the group
             if pointers[cam] < len(ts_list) and abs(ts_list[pointers[cam]] - ref_time) <= sync_tol:
                 group.append(pointers[cam])
                 used = True

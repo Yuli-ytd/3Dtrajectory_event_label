@@ -110,10 +110,9 @@ class PlaybackController:
                 panel.set_pixmap(pix)
                 ts = self.info.timestamps[cam_id][idx]
                 matches.append(f"{ts:.3f}")
-                
         
-        # self.status_label.setText(f"Frame: {self.info.frame_idx} | Ref Time: {ref_time:.3f} | Matched: {matches}")
-        self.status_label.setText(f"Frame: {self.info.frame_idx} | Ref Time: {ref_time:.3f}")
+        self.status_label.setText(f"Frame: {self.info.frame_idx} | Ref Time: {ref_time:.3f} | Matched: {matches}")
+        # self.status_label.setText(f"Frame: {self.info.frame_idx} | Ref Time: {ref_time:.3f}")
         self.slider.blockSignals(True)
         self.slider.setValue(self.info.frame_idx)
         self.slider.blockSignals(False)
@@ -146,7 +145,26 @@ class PlaybackController:
         ts, _ = self.info.synced_groups[fid]
         pos = []
         self.annot.toggle_event(event_type, fid, ts, pos)
+        
+        # # check if the event type is serve
+        # # if true, switch to rally phase and toggle the serve event
+        # if event_type == "serve":
+        #     # if is_clicked:
+        #     # self.annot.on_phase_switch("rally", fid, ts, event_type)
+        #     self.annot.toggle_event(event_type, fid, ts, pos)
+        # # check if the event type is dead
+        # # if true, toggle the dead event and switch to rest phase
+        # elif event_type == "dead":
+        #     # if is_clicked:
+        #     self.annot.toggle_event(event_type, fid, ts, pos)
+        #     # self.annot.on_phase_switch("rest", fid, ts, event_type)
+        #     # else:
+        #     #     self.annot.toggle_event(event_type, fid, ts, pos)
+        # else:
+        #     # For other events, just toggle the event
+        #     self.annot.toggle_event(event_type, fid, ts, pos)
     
     def save_annotations(self):
-        self.annot.save_annotations()
+        end_ts, _ = self.info.synced_groups[-1]
+        self.annot.save_annotations(end_ts)
         self.status_label.setText("Annotations saved successfully.")
