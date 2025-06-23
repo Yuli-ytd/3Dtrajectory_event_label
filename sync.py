@@ -187,6 +187,7 @@ class VideoSyncViewer(QMainWindow):
             box = QGroupBox(f"Camera {cam_id}")
             vbox = QVBoxLayout(box)
             panel = CameraPanel()
+            panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             vbox.addWidget(panel)
             grid.addWidget(box, idx // 2, idx % 2)
             self.panels.append(panel)
