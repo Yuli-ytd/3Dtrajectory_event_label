@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import pandas as pd
 import os
 import cv2
-
+from tqdm import tqdm
 @dataclass
 class CameraInfo:
     cam_id: int
@@ -18,7 +18,9 @@ def load_camera_data(file_path: str, cam_id: int) -> CameraInfo | None:
         
         cap = cv2.VideoCapture(os.path.join(file_path, f"CameraReader_{cam_id}.mp4"))
         frames = []
-        while True:
+        cap_frame = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        for i in tqdm(range(cap_frame), desc=f"Cam{cam_id}", leave=False):
             ret, frame = cap.read()
             if not ret:
                 break
