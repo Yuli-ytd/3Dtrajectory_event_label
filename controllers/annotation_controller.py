@@ -35,6 +35,28 @@ class AnnotationController:
                 "time_range": [self.start_timestamp, None],
                 "description": []
             }
+    
+    def _sync_segment(self, segment: Dict):
+        seg = segment["description"]
+        seg.sort(key=lambda e: e["fid"])
+        ts = [e["timestamp"] for e in seg]
+        if segment["phase"] == "rally":
+            segment["time_range"] = [min(ts), max(ts)]
+
+    def _sync_adjacent_rest(self, rally_idx: int):
+        
+        segments = self.segments
+        ts_start, ts_end = segments[rally_idx]["time_range"]
+
+        # adjust previous rest segment's time range
+        if rally_idx - 1 >= 0 and segments[rally_idx - 1]["phase"] == "rest":
+            segments[rally_idx - 1]["time_range"][1] = ts_start
+        
+        # adjust next rest segment's time range
+        if rally_idx + 1 < len(segments) and segments[rally_idx + 1]["phase"] == "rest":
+            segments[rally_idx + 1]["time_range"][0] = ts_end
+
+
         
     def on_phase_switch(self, new_phase: Optional[str], timestamp: float):
         
@@ -42,7 +64,16 @@ class AnnotationController:
         if self.current:
             self.current["time_range"][1] = timestamp
             self.segments.append(self.current)
+            if self.current["phase"] == "rally":
+                idx = len(self.segments) - 1
+                self._sync_adjacent_rest(idx)
             self.current = None
+        
+        # if the current segment is none, and the time range of the last segment is not closed, close it
+        elif new_phase and self.segments:
+            last = self.segments[-1]
+            if last["time_range"][1] is None:
+                last["time_range"][1] = timestamp
 
         # Start a new segment if a new phase is provided
         if new_phase:
@@ -79,30 +110,21 @@ class AnnotationController:
     
     def insert_event(self, new_event: Dict):
 
-        phase = self.phase_map[new_event["event_type"]]
         ts = new_event["timestamp"]
         et = new_event["event_type"]
-        
-        # check if the new event should be added to the previous segment by timestamp
-        for seg in self.segments:
-            if seg["phase"] == phase and seg["time_range"][0] <= ts <= seg["time_range"][1]:
-                seg["description"].append(new_event)
-                self._sync_segment(seg)
-                print(f"Added event {new_event} to existing segment {seg}")
-                return
-        
-        # if the event type is serve, it will not pass the above check
-        if et == "serve":
-            cands = [s for s in self.segments if s["phase"] == phase and s["time_range"][0] >= ts]
-            if cands:
-                # if there are candidates, find the one with the earliest time range
-                seg = min(cands, key=lambda s: s["time_range"][0])
-                seg["description"].append(new_event)
-                self._sync_segment(seg)
-                print(f"Added serve event {new_event} to existing segment {seg}")
-                return
+        phase = self.phase_map[et]
 
-        # If the event type is dead, it will not pass the above check
+        # Check if there's an open segment for the current phase
+        if self.current and self.current["phase"] == phase:
+            # If there's an open segment for the current phase, add the event to it
+            self.current["description"].append(new_event)
+            self._sync_segment(self.current)
+            print(f"Added event {new_event} to current segment {self.current}")
+            if et == "dead":
+                self.on_phase_switch("rest", ts)
+            return
+        
+        # If the event type is dead and the current segment is not open, check for existing segments
         if et == "dead":
             cands = [s for s in self.segments if s["phase"] == phase and s["time_range"][1] <= ts]
             if cands:
@@ -110,18 +132,46 @@ class AnnotationController:
                 seg = max(cands, key=lambda s: s["time_range"][1])
                 seg["description"].append(new_event)
                 self._sync_segment(seg)
+                idx = self.segments.index(seg)
+                self._sync_adjacent_rest(idx)
                 print(f"Added dead event {new_event} to existing segment {seg}")
                 return
+            
+        # if the event type is serve and the current segment is not open, check for existing segments
+        if et == "serve":
+            cands = [s for s in self.segments if s["phase"] == phase and s["time_range"][0] >= ts]
+            if cands:
+                # if there are candidates, find the one with the earliest time range
+                seg = min(cands, key=lambda s: s["time_range"][0])
+                seg["description"].append(new_event)
+                self._sync_segment(seg)
+                idx = self.segments.index(seg)
+                self._sync_adjacent_rest(idx)
+                print(f"Added serve event {new_event} to existing segment {seg}")
+                return
         
-        if self.current and self.current["phase"] == phase:
-            # If there's an open segment for the current phase, add the event to it
-            self.current["description"].append(new_event)
-            self._sync_segment(self.current)
-            print(f"Added event {new_event} to current segment {self.current}")
-            if new_event["event_type"] == "dead":
-                self.on_phase_switch("rest", new_event["timestamp"])
-            return
-        
+        # check if the new event should be added to the previous segment by timestamp
+        for seg in self.segments:
+            if seg["phase"] == phase and phase == "rest" and \
+                ((seg["time_range"][1] is None and seg["time_range"][0] <= ts) or 
+                 (seg["time_range"][0] <= ts <= seg["time_range"][1])):
+                # If the segment is found, add the event to it
+                seg["description"].append(new_event)
+                self._sync_segment(seg)
+                print(f"Added event {new_event} to existing segment {seg}")
+                return
+            if seg["phase"] == phase and phase == "rally" and \
+                ((seg["time_range"][0] <= ts <= seg["time_range"][1]) or
+                 (seg["description"][-1]["event_type"] != "dead")):
+                # If the segment is found, add the event to it
+                seg["description"].append(new_event)
+                self._sync_segment(seg)
+                idx = self.segments.index(seg)
+                self._sync_adjacent_rest(idx)
+                print(f"Added event {new_event} to existing segment {seg}")
+                return
+                        
+        # If no existing segment is found, create a new segment
         self.on_phase_switch(phase, new_event["timestamp"])
         self.current["description"].append(new_event)
         print(f"Created new segment for phase {phase} and added event {new_event}")
@@ -140,7 +190,7 @@ class AnnotationController:
                 segment["description"].remove(exists)
                 print(f"Removed event {exists} from segment {segment}")
                 # fix the time range of the segment if necessary
-                if len(segment["description"]) > 0:
+                if len(segment["description"]) > 0 and segment["phase"] != "rest":
                     if segment["time_range"][0] == timestamp:
                         # If the removed event was the first event in the segment, update the 
                         segment["time_range"][0] = segment["description"][0]["timestamp"]
@@ -148,7 +198,11 @@ class AnnotationController:
                     if segment["time_range"][1] == timestamp:
                         # If the removed event was the last event in the segment, update the 
                         segment["time_range"][1] = segment["description"][-1]["timestamp"]
-                else:
+                    
+                    idx = self.segments.index(segment)
+                    self._sync_adjacent_rest(idx)
+
+                elif len(segment["description"]) == 0:
                     # If the segment is now empty, remove it
                     self.segments.remove(segment)
                     print(f"Removed empty segment {segment}")
@@ -158,12 +212,6 @@ class AnnotationController:
         if self.current and exists in self.current.get("description", []):
             self.current["description"].remove(exists)
             print(f"Removed event {exists} from current segment {self.current}")
-        
-    def _sync_segment(self, segment: Dict):
-        seg = segment["description"]
-        seg.sort(key=lambda e: e["fid"])
-        ts = [e["timestamp"] for e in seg]
-        segment["time_range"] = [min(ts), max(ts)]
     
     def get_events_for_frame(self, frame_idx: int) -> List[Dict]:
         
@@ -187,12 +235,24 @@ class AnnotationController:
         if self.current and (self.current["description"] or self.current["phase"] == "rest"):
             try:
                 # If there's an open segment, close it
-                self.current["time_range"][1] = self.current["time_range"][-1]
+                self.current["time_range"][1] = self.current["description"][-1]["timestamp"]
             # If the current segment is rest and has no events, set the end timestamp
             except IndexError:
                 self.current["time_range"][1] = end_timestamp
             self.segments.append(self.current)
             self.current = None
+
+        elif self.segments and self.segments[-1]["time_range"][1] is None:
+            # If the last segment is open, close it with the end timestamp
+            self.segments[-1]["time_range"][1] = end_timestamp
+        
+        elif self.segments and self.segments[-1]["phase"] == "rally":
+            new_segment = {
+                "phase": "rest",
+                "time_range": [self.segments[-1]["time_range"][1], end_timestamp],
+                "description": []
+            }
+            self.segments.append(new_segment)
 
         with open(self.output_path, 'w', encoding='utf-8') as f:
             json.dump(self.segments, f, ensure_ascii=False, indent=2)
