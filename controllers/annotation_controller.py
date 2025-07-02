@@ -56,7 +56,37 @@ class AnnotationController:
         if rally_idx + 1 < len(segments) and segments[rally_idx + 1]["phase"] == "rest":
             segments[rally_idx + 1]["time_range"][0] = ts_end
 
+    def _find_closed_rally(self, phase: str, ts: float, et: str) :
+        cands = [s for s in self.segments if s["phase"]==phase and s["time_range"][1] is not None]
+        if et=="dead":
+            cands = [s for s in cands if s["time_range"][1] <= ts]
+            return max(cands, key=lambda s:s["time_range"][1], default=None)
+        else:  # serve
+            cands = [s for s in cands if s["time_range"][0] >= ts]
+            return min(cands, key=lambda s:s["time_range"][0], default=None)
+    
+    def _add_to_segment(self, segment: Dict, event: Dict):
 
+        segment["description"].append(event)
+        self._sync_segment(segment)
+        print(f"Added event {event} to existing segment {segment}")
+        # If the segment is a rally, sync adjacent rest segments
+        if segment is not self.current and segment["phase"] == "rally":
+            idx = self.segments.index(segment)
+            self._sync_adjacent_rest(idx)
+        # If the segment is the current one and the event is dead, switch to rest phase
+        if segment is self.current and event["event_type"] == "dead":
+            self.on_phase_switch("rest", event["timestamp"])
+        return
+    
+    def _match_segment(self, segment: Dict, ts: float, phase: str):
+        
+        start, end = segment["time_range"]
+        if phase == "rest":
+            return start<=ts and (end is None or ts<=end)
+
+        else:  # rally
+            return end is not None and start<=ts<=end and segment["description"][-1]["event_type"]!="dead"
         
     def on_phase_switch(self, new_phase: Optional[str], timestamp: float):
         
@@ -114,68 +144,25 @@ class AnnotationController:
         et = new_event["event_type"]
         phase = self.phase_map[et]
 
-        # Check if there's an open segment for the current phase
+        # 1. open segment: Check if there's an open segment for the current phase
         if self.current and self.current["phase"] == phase:
-            # If there's an open segment for the current phase, add the event to it
-            self.current["description"].append(new_event)
-            self._sync_segment(self.current)
-            print(f"Added event {new_event} to current segment {self.current}")
-            if et == "dead":
-                self.on_phase_switch("rest", ts)
-            return
+            return self._add_to_segment(self.current, new_event)
         
-        # If the event type is dead and the current segment is not open, check for existing segments
-        if et == "dead":
-            cands = [s for s in self.segments if s["phase"] == phase and s["time_range"][1] <= ts]
-            if cands:
-                # if there are candidates, find the one with the latest time range
-                seg = max(cands, key=lambda s: s["time_range"][1])
-                seg["description"].append(new_event)
-                self._sync_segment(seg)
-                idx = self.segments.index(seg)
-                self._sync_adjacent_rest(idx)
-                print(f"Added dead event {new_event} to existing segment {seg}")
-                return
-            
-        # if the event type is serve and the current segment is not open, check for existing segments
-        if et == "serve":
-            cands = [s for s in self.segments if s["phase"] == phase and s["time_range"][0] >= ts]
-            if cands:
-                # if there are candidates, find the one with the earliest time range
-                seg = min(cands, key=lambda s: s["time_range"][0])
-                seg["description"].append(new_event)
-                self._sync_segment(seg)
-                idx = self.segments.index(seg)
-                self._sync_adjacent_rest(idx)
-                print(f"Added serve event {new_event} to existing segment {seg}")
-                return
+        # 2. special type - dead/serve: If the current segment is not open and the event type is dead or serve, check for existing segments
+        if et in ["dead", "serve"]:
+            target_seg = self._find_closed_rally(phase, ts, et)
+            if target_seg:
+                return self._add_to_segment(target_seg, new_event)
         
-        # check if the new event should be added to the previous segment by timestamp
+        # 3. general type - others: Check if the new event should be added to the previous segment by timestamp
         for seg in self.segments:
-            if seg["phase"] == phase and phase == "rest" and \
-                ((seg["time_range"][1] is None and seg["time_range"][0] <= ts) or 
-                 (seg["time_range"][0] <= ts <= seg["time_range"][1])):
-                # If the segment is found, add the event to it
-                seg["description"].append(new_event)
-                self._sync_segment(seg)
-                print(f"Added event {new_event} to existing segment {seg}")
-                return
-            if seg["phase"] == phase and phase == "rally" and \
-                ((seg["time_range"][0] <= ts <= seg["time_range"][1]) or
-                 (seg["description"][-1]["event_type"] != "dead")):
-                # If the segment is found, add the event to it
-                seg["description"].append(new_event)
-                self._sync_segment(seg)
-                idx = self.segments.index(seg)
-                self._sync_adjacent_rest(idx)
-                print(f"Added event {new_event} to existing segment {seg}")
-                return
+            if seg["phase"]==phase and self._match_segment(seg, ts, phase):
+                return self._add_to_segment(seg, new_event)
                         
-        # If no existing segment is found, create a new segment
+        # 4. none of above: If no existing segment is found, create a new segment
         self.on_phase_switch(phase, new_event["timestamp"])
-        self.current["description"].append(new_event)
-        print(f"Created new segment for phase {phase} and added event {new_event}")
-
+        return self._add_to_segment(self.current, new_event)
+    
     def remove_existing_event(self, event_list: List[Dict], exists: Dict, frame_idx: int, timestamp: float):
         
         # remove the existing event from the by_frame dictionary
