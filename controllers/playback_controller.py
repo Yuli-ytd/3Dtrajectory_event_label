@@ -74,7 +74,7 @@ class PlaybackController:
         elif angle == 270:
             x, y = y, frame.shape[0] - x
 
-        cv2.circle(frame, (x, y), 6, (0, 0, 255), -1)
+        cv2.circle(frame, (x, y), 3, (0, 0, 255), -1)
         return frame
  
     def play_next_frame(self):

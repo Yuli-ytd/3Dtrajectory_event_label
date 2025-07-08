@@ -17,6 +17,7 @@ class MainWindow(QMainWindow):
         self.base_dir = base_dir
         self.sync_tol = sync_tol
         self.control = None
+        self.file_name = None
 
         self.setWindowTitle("3D Trajectory Event Labeling Tool")
         self.resize(940,950)
@@ -70,7 +71,7 @@ class MainWindow(QMainWindow):
             return
 
         # if the selected folder is same as the current one, do nothing
-        if hasattr(self, 'folder_path') and self.folder_path == self.folder_combo.currentText():
+        if getattr(self, 'file_name', None) == self.folder_combo.currentText():
             self.status_label.setText("Data already loaded.")
             return
 
@@ -93,7 +94,9 @@ class MainWindow(QMainWindow):
         )
 
         # Connect toolbar actions to the playback controller
-        self._bind_toolbar_actions(info.cam_ids)
+        if self.file_name is None:
+            self._bind_toolbar_actions(info.cam_ids)
+        self.file_name = self.folder_combo.currentText()
 
         # Connect the save button to the controller
         self.save_button.clicked.connect(self.control.save_annotations)

@@ -27,7 +27,7 @@ def load_camera_data(file_path: str, cam_id: int) -> CameraInfo | None:
             frames.append(frame)
         cap.release()
 
-        tracknet_path = os.path.join(file_path, f"TrackNet_{cam_id}.csv")
+        tracknet_path = os.path.join(file_path, f"CameraReader_{cam_id}_ball.csv")
         tracknet = pd.read_csv(tracknet_path).set_index('Frame') if os.path.exists(tracknet_path) else None
     
         return CameraInfo(cam_id, meta, frames, tracknet)

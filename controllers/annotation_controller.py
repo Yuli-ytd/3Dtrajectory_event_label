@@ -32,7 +32,7 @@ class AnnotationController:
             # Start the first segment as phase "rest", the time range starts at the first frame's timestamp
             self.current = {
                 "phase": "rest",
-                "time_range": [self.start_timestamp, None],
+                "time_interval": [self.start_timestamp, None],
                 "description": []
             }
     
@@ -41,29 +41,29 @@ class AnnotationController:
         seg.sort(key=lambda e: e["fid"])
         ts = [e["timestamp"] for e in seg]
         if segment["phase"] == "rally":
-            segment["time_range"] = [min(ts), max(ts)]
+            segment["time_interval"] = [min(ts), max(ts)]
 
     def _sync_adjacent_rest(self, rally_idx: int):
         
         segments = self.segments
-        ts_start, ts_end = segments[rally_idx]["time_range"]
+        ts_start, ts_end = segments[rally_idx]["time_interval"]
 
         # adjust previous rest segment's time range
         if rally_idx - 1 >= 0 and segments[rally_idx - 1]["phase"] == "rest":
-            segments[rally_idx - 1]["time_range"][1] = ts_start
+            segments[rally_idx - 1]["time_interval"][1] = ts_start
         
         # adjust next rest segment's time range
         if rally_idx + 1 < len(segments) and segments[rally_idx + 1]["phase"] == "rest":
-            segments[rally_idx + 1]["time_range"][0] = ts_end
+            segments[rally_idx + 1]["time_interval"][0] = ts_end
 
     def _find_closed_rally(self, phase: str, ts: float, et: str) :
-        cands = [s for s in self.segments if s["phase"]==phase and s["time_range"][1] is not None]
+        cands = [s for s in self.segments if s["phase"]==phase and s["time_interval"][1] is not None]
         if et=="dead":
-            cands = [s for s in cands if s["time_range"][1] <= ts]
-            return max(cands, key=lambda s:s["time_range"][1], default=None)
+            cands = [s for s in cands if s["time_interval"][1] <= ts]
+            return max(cands, key=lambda s:s["time_interval"][1], default=None)
         else:  # serve
-            cands = [s for s in cands if s["time_range"][0] >= ts]
-            return min(cands, key=lambda s:s["time_range"][0], default=None)
+            cands = [s for s in cands if s["time_interval"][0] >= ts]
+            return min(cands, key=lambda s:s["time_interval"][0], default=None)
     
     def _add_to_segment(self, segment: Dict, event: Dict):
 
@@ -81,7 +81,7 @@ class AnnotationController:
     
     def _match_segment(self, segment: Dict, ts: float, phase: str):
         
-        start, end = segment["time_range"]
+        start, end = segment["time_interval"]
         if phase == "rest":
             return start<=ts and (end is None or ts<=end)
 
@@ -92,7 +92,7 @@ class AnnotationController:
         
         # Close the current segment if it exists
         if self.current:
-            self.current["time_range"][1] = timestamp
+            self.current["time_interval"][1] = timestamp
             self.segments.append(self.current)
             if self.current["phase"] == "rally":
                 idx = len(self.segments) - 1
@@ -102,14 +102,14 @@ class AnnotationController:
         # if the current segment is none, and the time range of the last segment is not closed, close it
         elif new_phase and self.segments:
             last = self.segments[-1]
-            if last["time_range"][1] is None:
-                last["time_range"][1] = timestamp
+            if last["time_interval"][1] is None:
+                last["time_interval"][1] = timestamp
 
         # Start a new segment if a new phase is provided
         if new_phase:
             self.current = {
                 "phase": new_phase,
-                "time_range": [timestamp, None],
+                "time_interval": [timestamp, None],
                 "description": []
             }
     
@@ -178,13 +178,13 @@ class AnnotationController:
                 print(f"Removed event {exists} from segment {segment}")
                 # fix the time range of the segment if necessary
                 if len(segment["description"]) > 0 and segment["phase"] != "rest":
-                    if segment["time_range"][0] == timestamp:
+                    if segment["time_interval"][0] == timestamp:
                         # If the removed event was the first event in the segment, update the 
-                        segment["time_range"][0] = segment["description"][0]["timestamp"]
+                        segment["time_interval"][0] = segment["description"][0]["timestamp"]
                             
-                    if segment["time_range"][1] == timestamp:
+                    if segment["time_interval"][1] == timestamp:
                         # If the removed event was the last event in the segment, update the 
-                        segment["time_range"][1] = segment["description"][-1]["timestamp"]
+                        segment["time_interval"][1] = segment["description"][-1]["timestamp"]
                     
                     idx = self.segments.index(segment)
                     self._sync_adjacent_rest(idx)
@@ -222,21 +222,21 @@ class AnnotationController:
         if self.current and (self.current["description"] or self.current["phase"] == "rest"):
             try:
                 # If there's an open segment, close it
-                self.current["time_range"][1] = self.current["description"][-1]["timestamp"]
+                self.current["time_interval"][1] = self.current["description"][-1]["timestamp"]
             # If the current segment is rest and has no events, set the end timestamp
             except IndexError:
-                self.current["time_range"][1] = end_timestamp
+                self.current["time_interval"][1] = end_timestamp
             self.segments.append(self.current)
             self.current = None
 
-        elif self.segments and self.segments[-1]["time_range"][1] is None:
+        elif self.segments and self.segments[-1]["time_interval"][1] is None:
             # If the last segment is open, close it with the end timestamp
-            self.segments[-1]["time_range"][1] = end_timestamp
+            self.segments[-1]["time_interval"][1] = end_timestamp
         
         elif self.segments and self.segments[-1]["phase"] == "rally":
             new_segment = {
                 "phase": "rest",
-                "time_range": [self.segments[-1]["time_range"][1], end_timestamp],
+                "time_interval": [self.segments[-1]["time_interval"][1], end_timestamp],
                 "description": []
             }
             self.segments.append(new_segment)
