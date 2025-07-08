@@ -9,7 +9,7 @@ class CameraPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.image_label = QLabel(alignment=Qt.AlignCenter)
-        self.image_label.setMinimumSize(180, 120)
+        self.image_label.setMinimumSize(160, 120)
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         layout = QVBoxLayout(self)

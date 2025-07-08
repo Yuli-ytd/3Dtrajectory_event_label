@@ -3,12 +3,13 @@ from PyQt5.QtWidgets import QLabel, QSlider, QPushButton
 from PyQt5.QtGui import QPixmap, QImage
 from loaders.sync_manager import AllCamerasInfo
 from .annotation_controller import AnnotationController
+from ui.camera_panel import CameraPanel
 import cv2
 
 class PlaybackController:
     def __init__(self, 
                  cameras_info: AllCamerasInfo,
-                 panels: list,
+                 panels: list[CameraPanel],
                  status_label: QLabel,
                  slider: QSlider,
                  play_button: QPushButton,
@@ -145,24 +146,6 @@ class PlaybackController:
         ts, _ = self.info.synced_groups[fid]
         pos = []
         self.annot.toggle_event(event_type, fid, ts, pos)
-        
-        # # check if the event type is serve
-        # # if true, switch to rally phase and toggle the serve event
-        # if event_type == "serve":
-        #     # if is_clicked:
-        #     # self.annot.on_phase_switch("rally", fid, ts, event_type)
-        #     self.annot.toggle_event(event_type, fid, ts, pos)
-        # # check if the event type is dead
-        # # if true, toggle the dead event and switch to rest phase
-        # elif event_type == "dead":
-        #     # if is_clicked:
-        #     self.annot.toggle_event(event_type, fid, ts, pos)
-        #     # self.annot.on_phase_switch("rest", fid, ts, event_type)
-        #     # else:
-        #     #     self.annot.toggle_event(event_type, fid, ts, pos)
-        # else:
-        #     # For other events, just toggle the event
-        #     self.annot.toggle_event(event_type, fid, ts, pos)
     
     def save_annotations(self):
         end_ts, _ = self.info.synced_groups[-1]

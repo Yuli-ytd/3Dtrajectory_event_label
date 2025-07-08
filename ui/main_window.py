@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QHBoxLayout, QComboBox, QToolBar,
     QAction, QSizePolicy
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont
 from ui.camera_panel import CameraPanel
 from controllers.playback_controller import PlaybackController
@@ -101,9 +101,8 @@ class MainWindow(QMainWindow):
         # Connect the save button to the controller
         self.save_button.clicked.connect(self.control.save_annotations)
 
-        # Set the initial frame index and max frames
-        self._on_frame_changed(self.slider.value())
-        self.control.update_frames()
+        # Set the initial frame after loading
+        QTimer.singleShot(0, lambda: self._on_frame_changed(self.slider.value()))
 
     def _build_central_widget(self, info: AllCamerasInfo):
         
@@ -197,12 +196,9 @@ class MainWindow(QMainWindow):
         # Save
         tool_layout.addStretch(1)
         self.save_button = QPushButton("Save")
-        self.save_button.setFont(QFont("", 20, QFont.Bold))
-        self.save_button.setFixedHeight(50)
+        self.save_button.setFont(QFont("", 18, QFont.Bold))
         self.save_button.setFixedWidth(100)
-        # put the save button at middle position
-        self.save_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        tool_layout.addWidget(self.save_button)
+        tool_layout.addWidget(self.save_button, alignment=Qt.AlignCenter)
         
         return tool_box
 
@@ -305,6 +301,7 @@ class MainWindow(QMainWindow):
         """Ensure frames redraw on window resize."""
         super().resizeEvent(event)
         if self.control is not None:
+            print(f"\n3. Resize event: {event}")
             self.control.update_frames()
 
     def keyPressEvent(self, event):
@@ -315,17 +312,17 @@ class MainWindow(QMainWindow):
         k = event.key()
         if k == Qt.Key_T:
             self.control.show_tracknet = not self.control.show_tracknet
-            self.control.update_frames()
+
         elif k == Qt.Key_Right and self.control.info.frame_idx < self.control.info.max_frames - 1:
             new_fid = self.control.info.frame_idx + 1
             self.control.info.frame_idx = new_fid
             self.slider.setValue(new_fid)
-            self.control.update_frames()
+
         elif k == Qt.Key_Left and self.control.info.frame_idx > 0:
             new_fid = self.control.info.frame_idx - 1
             self.control.info.frame_idx = new_fid
             self.slider.setValue(new_fid)
-            self.control.update_frames()
+
         else:
             super().keyPressEvent(event)
         
