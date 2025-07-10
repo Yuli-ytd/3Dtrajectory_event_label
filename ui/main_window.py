@@ -141,7 +141,8 @@ class MainWindow(QMainWindow):
             }
             """
         )
-        self.slider.valueChanged.connect(self._on_frame_changed)
+        self.slider.valueChanged.connect(self._on_slider_value_changed)
+        self.slider.sliderReleased.connect(self._on_slider_released)
 
         self.play_button = QPushButton("Play")
 
@@ -296,12 +297,31 @@ class MainWindow(QMainWindow):
             self.current_allowed_btn = allowed
         
         self.control.update_frames()
+
+    def _on_slider_value_changed(self, value: int):
+        """拖動過程中只更新 frame_idx，不做任何 redraw。"""
+        if not self.control:
+            return
+        # 只改位置，不呼叫 update_frames()
+        self.control.info.frame_idx = value
+
+    def _on_slider_released(self):
+        """滑桿放手後，呼叫一次 __getitem__ 觸發精準 random access，然後 update_frames()。"""
+        if not self.control:
+            return
+        fid = self.control.info.frame_idx
+
+        # 對每支 camera 的 cache 都叫一次 __getitem__，啟動我們加強版 random_access
+        for cache in self.control.info.frames:
+            _ = cache[fid]
+
+        # 最後一次性更新畫面
+        self.control.update_frames()
     
     def resizeEvent(self, event):
         """Ensure frames redraw on window resize."""
         super().resizeEvent(event)
         if self.control is not None:
-            print(f"\n3. Resize event: {event}")
             self.control.update_frames()
 
     def keyPressEvent(self, event):
@@ -325,4 +345,10 @@ class MainWindow(QMainWindow):
 
         else:
             super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        """Handle window close event to release resources."""
+        if self.control is not None:
+            self.control.cleanup()
+        super().closeEvent(event)
         

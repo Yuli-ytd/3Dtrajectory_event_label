@@ -4,7 +4,9 @@ from PyQt5.QtGui import QPixmap, QImage
 from loaders.sync_manager import AllCamerasInfo
 from .annotation_controller import AnnotationController
 from ui.camera_panel import CameraPanel
+# from .prefetch_thread import PrefetchThread
 import cv2
+import time
 
 class PlaybackController:
     def __init__(self, 
@@ -16,6 +18,11 @@ class PlaybackController:
                  output_dir: str):
         
         self.info = cameras_info
+        for fc in self.info.frames:
+            if not fc:
+                raise ValueError("Frame cache is empty. Ensure the video files are loaded correctly.")
+            fc.clear()  # Clear the frame cache to free memory
+        # self.prefetch = PrefetchThread(self.info)
         self.status_label = status_label
         self.panels = panels
         self.slider = slider
@@ -47,14 +54,15 @@ class PlaybackController:
                               180: cv2.ROTATE_180,
                               270: cv2.ROTATE_90_COUNTERCLOCKWISE}
             frame = cv2.rotate(frame, rotate_control[ang])
-        
-        # Show TrackNet points if enabled    
-        if self.show_tracknet:
-            df = self.info.tracknets[cam_id]
-            if (df is not None) and (idx in df.index) and (df.loc[idx, "Visibility"] == 1):
-                x, y = int(df.loc[idx]["X"]), int(df.loc[idx]["Y"])
-                frame = self._draw_tracknet_point(frame, x, y, ang)
 
+        if not self.info.playing:
+            
+            # Show TrackNet points if enabled    
+            if self.show_tracknet:
+                df = self.info.tracknets[cam_id]
+                if (df is not None) and (idx in df.index) and (df.loc[idx, "Visibility"] == 1):
+                    x, y = int(df.loc[idx]["X"]), int(df.loc[idx]["Y"])
+                    frame = self._draw_tracknet_point(frame, x, y, ang)
 
         # Convert the frame to QPixmap
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -90,7 +98,7 @@ class PlaybackController:
     def update_frames(self):
         if self.is_updating:
             return
-        
+        # start_ts = time.perf_counter()
         self.is_updating = True
         if self.info.frame_idx >= self.info.max_frames:
             self.status_label.setText("No more frames.")
@@ -117,6 +125,10 @@ class PlaybackController:
         self.slider.blockSignals(True)
         self.slider.setValue(self.info.frame_idx)
         self.slider.blockSignals(False)
+
+        # end_ts = time.perf_counter()
+        # elapsed = (end_ts - start_ts) * 1000  # Convert to milliseconds
+        # print(f"Update frames took {elapsed:.2f} ms")
         self.is_updating = False
     
     def on_slider_changed(self, value: int):
@@ -126,12 +138,14 @@ class PlaybackController:
     def toggle_playback(self):
         if self.info.playing:
             self.timer.stop()
+            # self.prefetch.stop()
             self.play_button.setText("Play")
             self.info.playing = False
         else:
-            self.timer.start(7)
+            self.timer.start(9)
             self.play_button.setText("Pause")
             self.info.playing = True
+            # self.prefetch.start()
 
     def rotate_single_camera(self, cam_id: int):
         self.info.rotation_angles[cam_id] = (self.info.rotation_angles[cam_id] + 90) % 360
@@ -151,3 +165,12 @@ class PlaybackController:
         end_ts, _ = self.info.synced_groups[-1]
         self.annot.save_annotations(end_ts)
         self.status_label.setText("Annotations saved successfully.")
+
+    def cleanup(self):
+        """Release resources and save annotations."""
+        self.timer.stop()
+        for fc in self.info.frames:
+            if fc:
+                fc.clear()
+                fc.__del__()
+

@@ -2,12 +2,13 @@ import os
 from dataclasses import dataclass
 import pandas as pd
 from loaders.data_loader import load_camera_data
+from loaders.frame_cache import FrameCache
 
 @dataclass
 class AllCamerasInfo:
     cam_ids: list
     metas: list[pd.DataFrame]
-    frames: list[list]
+    frames: list[FrameCache]
     timestamps: list[list]
     tracknets: list[pd.DataFrame | None]
     synced_groups: list
