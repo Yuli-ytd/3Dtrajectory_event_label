@@ -141,8 +141,10 @@ class MainWindow(QMainWindow):
             }
             """
         )
-        self.slider.valueChanged.connect(self._on_slider_value_changed)
-        self.slider.sliderReleased.connect(self._on_slider_released)
+        # self.slider.valueChanged.connect(self._on_slider_value_changed)
+        # self.slider.sliderReleased.connect(self._on_slider_released)
+        self.slider.valueChanged.connect(self._on_frame_changed)
+
 
         self.play_button = QPushButton("Play")
 
@@ -342,6 +344,32 @@ class MainWindow(QMainWindow):
             new_fid = self.control.info.frame_idx - 1
             self.control.info.frame_idx = new_fid
             self.slider.setValue(new_fid)
+
+        elif k == Qt.Key_Space:
+            if self.control.info.playing:
+                self.control.timer.stop()
+                self.play_button.setText("Play")
+            else:
+                self.control.timer.start()
+                self.play_button.setText("Pause")
+            self.control.info.playing = not self.control.info.playing
+        
+        elif k == Qt.Key_Up and self.control.info.frame_idx < self.control.info.max_frames - 1:
+            if self.control.info.frame_idx + 30 < self.control.info.max_frames - 1:
+                new_fid = self.control.info.frame_idx + 30
+            else:
+                new_fid = self.control.info.max_frames - 1
+            self.control.info.frame_idx = new_fid
+            self.slider.setValue(new_fid)
+    
+        elif k == Qt.Key_Down and self.control.info.frame_idx > 0:
+            if self.control.info.frame_idx - 30 > 0:
+                new_fid = self.control.info.frame_idx - 30
+            else:
+                new_fid = 0
+            self.control.info.frame_idx = new_fid
+            self.slider.setValue(new_fid)
+
 
         else:
             super().keyPressEvent(event)
