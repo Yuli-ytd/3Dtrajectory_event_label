@@ -14,24 +14,30 @@ class FrameCache:
 
     def _random_access(self, idx: int):
         
-        start = max(0, idx - self.capacity)
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+        start_hint = max(0, idx - self.capacity)
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, start_hint)
 
-        frame = None
+        self._fill_cache_from_current_pos(idx)
+        self.last_idx = idx
 
-        for i in range(start, idx + 1):
+        return self.cache[idx]
+    
+    def _fill_cache_from_current_pos(self, stop_idx: int):
+        """ Fill cache with frames from current position to stop_idx.
+        This is used to pre-load frames when accessing a range of frames.
+        """
+        while True:
+            cur_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) # Get current frame index
+            if cur_pos > stop_idx:
+                break
+
             ret, frame = self.cap.read()
             if not ret:
-                raise IndexError(f"Frame {idx} not available in {self.video_path}")
-            
-            self.cache[i] = frame  # Cache the frame
+                raise IndexError(f"Frame {stop_idx} not in {self.video_path}")
 
+            self.cache[cur_pos] = frame
             if len(self.cache) > self.capacity:
-                # Evict oldest frame if cache exceeds capacity
                 self.cache.popitem(last=False)
-            
-        self.last_idx = idx
-        return frame
 
     def __getitem__(self, idx: int):
         # Return frame from cache or load if missing
@@ -43,22 +49,19 @@ class FrameCache:
             return frame
         
         # Cache miss: read frame and insert
-        if idx == self.last_idx + 1:
+        cur_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+        if idx == cur_pos:
             # Sequential access, read next frame
             ret, frame = self.cap.read()
             if not ret:
                 raise IndexError(f"Frame {idx} not available in {self.video_path}")
-            self.last_idx = idx
-        else:
-            frame = self._random_access(idx)
+            real_idx = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+            self.cache[real_idx] = frame
+            self.last_idx = real_idx
+            return frame
         
-        # Insert into cache
-        self.cache[idx] = frame
-        # Evict oldest if over capacity
-        if len(self.cache) > self.capacity:
-            self.cache.popitem(last=False)
-
-        return frame
+        else:
+            return self._random_access(idx)
     
     def __del__(self):
         """Release video capture when the cache is deleted."""
