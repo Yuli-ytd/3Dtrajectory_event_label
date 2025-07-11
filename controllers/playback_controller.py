@@ -21,7 +21,7 @@ class PlaybackController:
         for fc in self.info.frames:
             if not fc:
                 raise ValueError("Frame cache is empty. Ensure the video files are loaded correctly.")
-            fc.clear()  # Clear the frame cache to free memory
+            # fc.clear()  # Clear the frame cache to free memory
         # self.prefetch = PrefetchThread(self.info)
         self.status_label = status_label
         self.panels = panels
@@ -38,7 +38,7 @@ class PlaybackController:
         self.annot = AnnotationController(output_dir, self.info.synced_groups[0][0])
         
         # ui event connections
-        self.slider.valueChanged.connect(self.on_slider_changed)
+        # self.slider.valueChanged.connect(self.on_slider_changed)
         self.play_button.clicked.connect(self.toggle_playback)
 
     def _render_frame(self, cam_id: int, idx: int) -> QPixmap:
