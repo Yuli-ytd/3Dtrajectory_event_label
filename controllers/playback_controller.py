@@ -7,6 +7,7 @@ from ui.camera_panel import CameraPanel
 # from .prefetch_thread import PrefetchThread
 import cv2
 import time
+import queue
 
 class PlaybackController:
     def __init__(self, 
@@ -42,37 +43,46 @@ class PlaybackController:
         self.play_button.clicked.connect(self.toggle_playback)
 
     def _render_frame(self, cam_id: int, idx: int) -> QPixmap:
+        """渲染幀，包含錯誤處理"""
+        try:
+            # Get the frame and apply brightness adjustment
+            frame = self.info.frames[cam_id][idx]
+            frame = cv2.convertScaleAbs(frame, alpha = self.info.brightness_factor, beta = 0)
             
-        # Get the frame and apply brightness adjustment
-        frame = self.info.frames[cam_id][idx]
-        frame = cv2.convertScaleAbs(frame, alpha = self.info.brightness_factor, beta = 0)
-        
-        # Rotate the frame if necessary
-        ang = self.info.rotation_angles[cam_id]
-        if ang != 0:
-            rotate_control = {90: cv2.ROTATE_90_CLOCKWISE,
-                              180: cv2.ROTATE_180,
-                              270: cv2.ROTATE_90_COUNTERCLOCKWISE}
-            frame = cv2.rotate(frame, rotate_control[ang])
+            # Rotate the frame if necessary
+            ang = self.info.rotation_angles[cam_id]
+            if ang != 0:
+                rotate_control = {90: cv2.ROTATE_90_CLOCKWISE,
+                                  180: cv2.ROTATE_180,
+                                  270: cv2.ROTATE_90_COUNTERCLOCKWISE}
+                frame = cv2.rotate(frame, rotate_control[ang])
 
-        if not self.info.playing:
+            if not self.info.playing:
+                
+                # Show TrackNet points if enabled    
+                if self.show_tracknet:
+                    df = self.info.tracknets[cam_id]
+                    if (df is not None) and (idx in df.index) and (df.loc[idx, "Visibility"] == 1):
+                        x, y = int(df.loc[idx]["X"]), int(df.loc[idx]["Y"])
+                        frame = self._draw_tracknet_point(frame, x, y, ang)
+
+            # Convert the frame to QPixmap
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            img = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+            pix = QPixmap.fromImage(img)
+            pw = self.panels[cam_id].width() 
+            ph = self.panels[cam_id].height()
+            pix = pix.scaled(pw, ph, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            return pix
             
-            # Show TrackNet points if enabled    
-            if self.show_tracknet:
-                df = self.info.tracknets[cam_id]
-                if (df is not None) and (idx in df.index) and (df.loc[idx, "Visibility"] == 1):
-                    x, y = int(df.loc[idx]["X"]), int(df.loc[idx]["Y"])
-                    frame = self._draw_tracknet_point(frame, x, y, ang)
-
-        # Convert the frame to QPixmap
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        img = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
-        pix = QPixmap.fromImage(img)
-        pw = self.panels[cam_id].width() 
-        ph = self.panels[cam_id].height()
-        pix = pix.scaled(pw, ph, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        return pix
+        except Exception as e:
+            # 處理所有錯誤
+            print(f"渲染幀錯誤：{e}")
+            # 返回空白圖片
+            pix = QPixmap(self.panels[cam_id].width(), self.panels[cam_id].height())
+            pix.fill(Qt.black)
+            return pix
     
     def _draw_tracknet_point(self, frame, x: int, y: int, angle: int):
         # Adjust coordinates based on rotation angle
@@ -105,31 +115,66 @@ class PlaybackController:
             self.is_updating = False
             return
         
-        ref_time, group = self.info.synced_groups[self.info.frame_idx]
-        matches = []
-        for cam_id, idx in enumerate(group):
-            panel = self.panels[cam_id]
-            if idx is None:
-                panel.set_pixmap(QPixmap())
-                matches.append("None")
-                continue
+        try:
+            ref_time, group = self.info.synced_groups[self.info.frame_idx]
+            matches = []
+            for cam_id, idx in enumerate(group):
+                panel = self.panels[cam_id]
+                if idx is None:
+                    panel.set_pixmap(QPixmap())
+                    matches.append("None")
+                    continue
+                
+                else:
+                    pix = self._render_frame(cam_id, idx)
+                    panel.set_pixmap(pix)
+                    ts = self.info.timestamps[cam_id][idx]
+                    matches.append(f"{ts:.3f}")
             
-            else:
-                pix = self._render_frame(cam_id, idx)
-                panel.set_pixmap(pix)
-                ts = self.info.timestamps[cam_id][idx]
-                matches.append(f"{ts:.3f}")
-        
-        self.status_label.setText(f"Frame: {self.info.frame_idx} | Ref Time: {ref_time:.3f} | Matched: {matches}")
-        # self.status_label.setText(f"Frame: {self.info.frame_idx} | Ref Time: {ref_time:.3f}")
-        self.slider.blockSignals(True)
-        self.slider.setValue(self.info.frame_idx)
-        self.slider.blockSignals(False)
+            self.status_label.setText(f"Frame: {self.info.frame_idx} | Ref Time: {ref_time:.3f} | Matched: {matches}")
+            # self.status_label.setText(f"Frame: {self.info.frame_idx} | Ref Time: {ref_time:.3f}")
+            self.slider.blockSignals(True)
+            self.slider.setValue(self.info.frame_idx)
+            self.slider.blockSignals(False)
 
-        # end_ts = time.perf_counter()
-        # elapsed = (end_ts - start_ts) * 1000  # Convert to milliseconds
-        # print(f"Update frames took {elapsed:.2f} ms")
+            # 智能預取：在更新幀後觸發預取
+            self._trigger_prefetch()
+            
+            # end_ts = time.perf_counter()
+            # elapsed = (end_ts - start_ts) * 1000  # Convert to milliseconds
+            # print(f"Update frames took {elapsed:.2f} ms")
+            
+        except Exception as e:
+            print(f"更新幀時發生錯誤：{e}")
+            self.status_label.setText(f"Error: {str(e)}")
+        
         self.is_updating = False
+    
+    def _trigger_prefetch(self):
+        """觸發智能預取"""
+        try:
+            # 預取目前幀附近的幀
+            for fc in self.info.frames:
+                if fc:
+                    fc.prefetch_around_current()
+            
+            # 如果正在播放，預取下一批幀
+            if self.info.playing:
+                next_frames = []
+                for i in range(1, 31):  # 預取接下來30幀
+                    next_frame = self.info.frame_idx + i
+                    if next_frame < self.info.max_frames:
+                        next_frames.append(next_frame)
+                
+                # 觸發預取
+                for fc in self.info.frames:
+                    if fc and next_frames:
+                        try:
+                            fc.prefetch_queue.put_nowait(next_frames[0])
+                        except queue.Full:
+                            pass
+        except Exception as e:
+            print(f"預取觸發錯誤：{e}")
     
     def on_slider_changed(self, value: int):
         self.info.frame_idx = value
@@ -171,6 +216,7 @@ class PlaybackController:
         self.timer.stop()
         for fc in self.info.frames:
             if fc:
-                fc.clear()
-                fc.__del__()
+                # fc.clear()
+                # fc.__del__()
+                fc.stop()
 

@@ -1,206 +1,326 @@
 import cv2
-from collections import OrderedDict
+from collections import OrderedDict, deque
 import time
 import threading
+import queue
 
-# class FrameCache:
-#     """
-#     LRU Cache for video frames. On cache miss, reads frame from disk.
-#     """
-#     def __init__(self, video_path: str, capacity: int = 360, jump_size: int = 30):
-#         self.video_path = video_path
-#         self.cap = cv2.VideoCapture(video_path)
-#         self.capacity = capacity
-#         self.cache = OrderedDict()  # idx -> frame (ndarray)
-#         self.lock = threading.Lock()
-#         self.decode_ptr = -1
-#         self.stopped = False
-#         self.last_idx = -1 # Last accessed frame index
-
-#         # assert capacity >= jump_size
-#         self.prefetch_threshold = capacity // 2
-
-#         for _ in range(capacity):
-#             ret, frame = self.cap.read()
-#             if not ret:
-#                 break
-#             idx = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-#             self.cache[idx] = frame
-#             self.decode_ptr = idx
-
-#         self.worker = threading.Thread(target=self._decode_loop, daemon=True)
-#         self.worker.start()
-
-#     # def _random_access(self, idx: int):
-        
-#     #     start_hint = max(0, idx - self.capacity)
-#     #     self.cap.set(cv2.CAP_PROP_POS_FRAMES, start_hint)
-
-#     #     self._fill_cache_from_current_pos(idx)
-#     #     self.last_idx = idx
-
-#     #     return self.cache[idx]
-
-#     def _decode_loop(self):
-#         """
-#         持續從頭開始解碼，直到 capacity 幀滿，之後若發生目前的idx位於超過cache一半的位置，則啟動sliding window:
-#         pop 最舊、推入最新。
-#         """
-
-#         while not self.stopped:
-#             with self.lock:
-#                 pos = list(self.cache.keys()).index(self.last_idx) if self.last_idx in self.cache else -1
-#                 # 如果還沒 decode 到 capacity，就繼續填
-#                 if len(self.cache) < self.capacity:
-#                     do_pop = False
-#                 else:
-#                     # cache 已滿，只有當使用者讀到中點之後才 pop
-#                     do_pop = (self.last_idx > self.prefetch_threshold)
-
-#             # 如果要停一下，避免空轉
-#             if len(self.cache) >= self.capacity and not do_pop:
-#                 time.sleep(0.01)
-#                 continue
-
-#             # 真正 decode 一張
-#             ret, frame = self.cap.read()
-#             if not ret:
-#                 break
-#             idx = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-
-#             with self.lock:
-#                 # pop 最舊
-#                 if do_pop and pos >= self.prefetch_threshold:
-#                     self.cache.popitem(last=False)
-#                 # push 新幀
-#                 self.cache[idx] = frame
-#                 self.decode_ptr = idx
-
-#         self.stopped = True
-    
-#     def _fill_cache_from_current_pos(self, stop_idx: int):
-#         """ Fill cache with frames from current position to stop_idx.
-#         This is used to pre-load frames when accessing a range of frames.
-#         """
-#         while True:
-#             cur_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) # Get current frame index
-#             if cur_pos > stop_idx:
-#                 break
-
-#             ret, frame = self.cap.read()
-#             if not ret:
-#                 raise IndexError(f"Frame {stop_idx} not in {self.video_path}")
-
-#             self.cache[cur_pos] = frame
-#             if len(self.cache) > self.capacity:
-#                 self.cache.popitem(last=False)
-
-#     def __getitem__(self, idx: int):
-#         """
-#         只在 cache 範圍內取資料；超出就 IndexError。
-#         """
-#         with self.lock:
-#             if idx in self.cache:
-#                 self.last_idx = idx   # 使用者真的讀到這裡
-#                 return self.cache[idx]
-#             min_idx = next(iter(self.cache))
-#             max_idx = self.decode_ptr
-#             raise IndexError(f"Frame {idx} not in cache window [{min_idx}…{max_idx}].")
-
-        # # Return frame from cache or load if missing
-        # if idx in self.cache:
-        #     # Move to end to mark as recently used
-        #     frame = self.cache.pop(idx)
-        #     self.cache[idx] = frame
-        #     self.last_idx = idx
-        #     return frame
-        
-        # # Cache miss: read frame and insert
-        # cur_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-        # if idx == cur_pos:
-        #     # Sequential access, read next frame
-        #     ret, frame = self.cap.read()
-        #     if not ret:
-        #         raise IndexError(f"Frame {idx} not available in {self.video_path}")
-        #     real_idx = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-        #     self.cache[real_idx] = frame
-        #     self.last_idx = real_idx
-        #     return frame
-        
-        # else:
-        #     return self._random_access(idx)
-        
 class FrameCache:
-    def __init__(self, video_path, capacity=360, jump_size=30):
+    """
+    精確的影片快取系統
+    - 使用順序解碼確保幀級精確度
+    - 智能預取策略減少延遲
+    - 支援向前向後瀏覽
+    - 限制記憶體使用
+    """
+    def __init__(self, video_path: str, initial_cache_seconds: int = 3, 
+                 cache_window_seconds: int = 6, max_cache_size: int = 1000):
+        self.video_path = video_path
         self.cap = cv2.VideoCapture(video_path)
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)        # ← 保證從 0 開始
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.capacity = capacity
-        self.cache = OrderedDict()                      # idx -> frame
+        
+        # 快取參數
+        self.initial_cache_frames = int(initial_cache_seconds * self.fps)
+        self.cache_window_frames = int(cache_window_seconds * self.fps)
+        self.max_cache_size = max_cache_size
+        
+        # 快取狀態
+        self.cache = OrderedDict()  # frame_idx -> frame
+        self.current_frame = 0      # 目前播放的幀
+        
+        # 順序解碼追蹤器
+        self.decode_position = 0    # 目前解碼位置
+        self.frame_queue = deque()  # 解碼幀佇列
+        self.max_queue_size = 100   # 佇列最大大小
+        
+        # 執行緒控制
         self.lock = threading.Lock()
-        self.decode_ptr = -1
-        self.last_idx   = -1
-        self.stopped    = False
-        self.jump_size  = jump_size                     # 預取的幀數
-        self.threshold  = capacity // 2                 # 播到一半才開始 pop
-
-        # ---------- Prefill ----------
-        for _ in range(capacity):
+        self.stopped = False
+        
+        # 預取執行緒
+        self.prefetch_thread = None
+        self.prefetch_queue = queue.Queue()
+        self.start_prefetch_thread()
+        
+        # 初始化快取
+        self._load_initial_cache()
+    
+    def start_prefetch_thread(self):
+        """啟動預取執行緒"""
+        self.prefetch_thread = threading.Thread(target=self._prefetch_worker, daemon=True)
+        self.prefetch_thread.start()
+    
+    def _prefetch_worker(self):
+        """預取工作執行緒"""
+        while not self.stopped:
+            try:
+                # 從佇列取得預取請求
+                target_frame = self.prefetch_queue.get(timeout=0.1)
+                if target_frame is None:  # 停止信號
+                    break
+                
+                # 預取目標幀附近的幀
+                self._prefetch_frames_around(target_frame)
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"預取執行緒錯誤：{e}")
+    
+    def _prefetch_frames_around(self, center_frame: int):
+        """預取中心幀附近的幀"""
+        window_start = max(0, center_frame - self.cache_window_frames // 2)
+        window_end = min(self.total_frames, center_frame + self.cache_window_frames // 2)
+        
+        # 檢查哪些幀需要載入
+        frames_to_load = []
+        for frame_idx in range(window_start, window_end):
+            if frame_idx not in self.cache:
+                frames_to_load.append(frame_idx)
+        
+        if not frames_to_load:
+            return
+        
+        # 順序載入幀
+        self._sequential_load_frames(frames_to_load)
+    
+    def _sequential_load_frames(self, frame_indices: list):
+        """順序載入指定的幀"""
+        if not frame_indices:
+            return
+        
+        # 排序幀索引以優化載入
+        frame_indices.sort()
+        
+        # 找到最接近目前解碼位置的起始點
+        start_idx = min(frame_indices, key=lambda x: abs(x - self.decode_position))
+        
+        # 從起始點開始順序解碼
+        self._seek_to_frame_sequential(start_idx)
+        
+        frames_loaded = 0
+        for target_idx in frame_indices:
+            if self.stopped:
+                break
+            
+            # 如果目標幀已經在快取中，跳過
+            if target_idx in self.cache:
+                continue
+            
+            # 順序解碼直到達到目標幀
+            while self.decode_position <= target_idx and not self.stopped:
+                ret, frame = self.cap.read()
+                if not ret:
+                    break
+                
+                # 將幀加入快取
+                self.cache[self.decode_position] = frame.copy()
+                
+                # 同時加入佇列（用於預取）
+                self.frame_queue.append((self.decode_position, frame.copy()))
+                self.decode_position += 1
+                
+                # 限制佇列大小
+                if len(self.frame_queue) > self.max_queue_size:
+                    self.frame_queue.popleft()
+            
+            if target_idx in self.cache:
+                frames_loaded += 1
+        
+        # 清理過期的快取
+        self._cleanup_cache()
+        
+        if frames_loaded > 0:
+            print(f"預取載入 {frames_loaded} 幀")
+    
+    def _load_frame_direct(self, frame_idx: int):
+        """直接載入單一幀（用於向後跳轉）"""
+        if frame_idx in self.cache:
+            return
+        
+        # 如果目標幀在目前解碼位置之前，需要重新開始
+        if frame_idx < self.decode_position:
+            # 創建新的VideoCapture物件
+            new_cap = cv2.VideoCapture(self.video_path)
+            if not new_cap.isOpened():
+                raise RuntimeError("無法重新開啟影片檔案")
+            
+            # 釋放舊的並替換
+            self.cap.release()
+            self.cap = new_cap
+            self.decode_position = 0
+            self.frame_queue.clear()
+        
+        # 順序解碼到目標幀
+        while self.decode_position <= frame_idx:
             ret, frame = self.cap.read()
             if not ret:
                 break
-            idx = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-            self.cache[idx] = frame
-            self.decode_ptr = idx
-
-        # ---------- Background decode ----------
-        self.worker = threading.Thread(target=self._decode_loop, daemon=True)
-        self.worker.start()
-
-    # ------------ Background thread ------------
-    def _decode_loop(self):
-        while True:
+            
+            # 將幀加入快取
+            self.cache[self.decode_position] = frame.copy()
+            self.decode_position += 1
+    
+    def _load_frame_simple(self, frame_idx: int):
+        """簡單載入單一幀（避免記憶體問題）"""
+        if frame_idx in self.cache:
+            return
+        
+        # 創建臨時的VideoCapture物件
+        temp_cap = cv2.VideoCapture(self.video_path)
+        if not temp_cap.isOpened():
+            raise RuntimeError("無法開啟影片檔案")
+        
+        # 順序解碼到目標幀
+        current_pos = 0
+        while current_pos <= frame_idx:
+            ret, frame = temp_cap.read()
+            if not ret:
+                break
+            
+            # 只將目標幀加入快取
+            if current_pos == frame_idx:
+                self.cache[frame_idx] = frame.copy()
+                break
+            
+            current_pos += 1
+        
+        temp_cap.release()
+    
+    def _seek_to_frame_sequential(self, target_frame: int):
+        """順序定位到指定幀（不使用set）"""
+        if target_frame < self.decode_position:
+            # 需要重新開始
+            new_cap = cv2.VideoCapture(self.video_path)
+            if not new_cap.isOpened():
+                raise RuntimeError("無法重新開啟影片檔案")
+            
+            # 釋放舊的並替換
+            self.cap.release()
+            self.cap = new_cap
+            self.decode_position = 0
+            self.frame_queue.clear()
+        
+        # 順序解碼到目標幀
+        while self.decode_position < target_frame:
             ret, frame = self.cap.read()
             if not ret:
-                self.stopped = True
                 break
-
-            idx = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-            with self.lock:
-                # 永不删，缓存一路长到视频末尾
-                self.cache[idx] = frame
-                self.decode_ptr = idx
-
-    # ------------ Public read ------------
-    def __getitem__(self, idx):
-
-        # clamp idx 到文件末尾
-        idx = min(idx, self.total_frames - 1)
-
-        # 不用 cap.set()。如果缓存里没有，就等它补齐
-        while True:
-            with self.lock:
-                if idx in self.cache:
-                    self.last_idx = idx
-                    return self.cache[idx]
-                # 如果已经解到尾了，还是没这帧，就抛错
-                if self.stopped and self.decode_ptr < idx:
-                    mins, maxs = next(iter(self.cache)), self.decode_ptr
-                    raise IndexError(f"Frame {idx} not in window [{mins}…{maxs}]")
-            # 小歇一下，让后台线程跑跑
-            time.sleep(0.005)
-
-    # ------------ Cleanup ------------
+            self.decode_position += 1
+    
+    def _load_initial_cache(self):
+        """載入初始快取（前幾秒的影片）"""
+        print("開始載入初始快取...")
+        
+        # 直接順序載入前幾幀
+        frames_to_load = min(self.initial_cache_frames, self.total_frames)
+        
+        for i in range(frames_to_load):
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+            self.cache[i] = frame.copy()
+            self.decode_position = i + 1
+        
+        print(f"初始快取載入完成：{len(self.cache)} 幀")
+    
+    def _ensure_frame_in_cache(self, frame_idx: int):
+        """確保指定幀在快取中"""
+        if frame_idx in self.cache:
+            return
+        
+        # 如果幀在目前解碼位置之前，使用簡單載入（避免記憶體問題）
+        if frame_idx < self.decode_position:
+            self._load_frame_simple(frame_idx)
+        else:
+            # 將預取請求加入佇列
+            try:
+                self.prefetch_queue.put_nowait(frame_idx)
+            except queue.Full:
+                # 佇列滿了，直接載入
+                self._sequential_load_frames([frame_idx])
+    
+    def _cleanup_cache(self):
+        """清理過期的快取，保持記憶體使用在合理範圍"""
+        if len(self.cache) <= self.max_cache_size:
+            return
+        
+        # 保留以目前幀為中心的視窗
+        center = self.current_frame
+        window_start = max(0, center - self.cache_window_frames // 2)
+        window_end = min(self.total_frames, center + self.cache_window_frames // 2)
+        
+        # 移除視窗外的幀
+        keys_to_remove = []
+        for frame_idx in self.cache.keys():
+            if frame_idx < window_start or frame_idx >= window_end:
+                keys_to_remove.append(frame_idx)
+        
+        for key in keys_to_remove:
+            del self.cache[key]
+        
+        if keys_to_remove:
+            print(f"清理了 {len(keys_to_remove)} 個過期幀")
+    
+    def __getitem__(self, frame_idx: int):
+        """取得指定幀"""
+        if frame_idx < 0 or frame_idx >= self.total_frames:
+            raise IndexError(f"幀索引 {frame_idx} 超出範圍 [0, {self.total_frames})")
+        
+        with self.lock:
+            self.current_frame = frame_idx
+            
+            # 確保幀在快取中
+            self._ensure_frame_in_cache(frame_idx)
+            
+            # 等待幀載入完成
+            max_wait = 0.5  # 最大等待時間
+            start_time = time.time()
+            while frame_idx not in self.cache:
+                if time.time() - start_time > max_wait:
+                    raise IndexError(f"載入幀 {frame_idx} 超時")
+                time.sleep(0.01)
+            
+            # 返回幀
+            return self.cache[frame_idx]
+    
+    def prefetch_around_current(self):
+        """預取目前幀附近的幀"""
+        if self.prefetch_queue.empty():
+            try:
+                self.prefetch_queue.put_nowait(self.current_frame)
+            except queue.Full:
+                pass
+    
+    def get_cache_info(self):
+        """取得快取資訊"""
+        with self.lock:
+            return {
+                'cache_size': len(self.cache),
+                'current_frame': self.current_frame,
+                'total_frames': self.total_frames,
+                'decode_position': self.decode_position,
+                'queue_size': len(self.frame_queue)
+            }
+    
     def stop(self):
+        """停止快取系統"""
         self.stopped = True
-        self.worker.join()
-        self.cap.release()    
-
-
-    def __del__(self):
-        """Release video capture when the cache is deleted."""
+        if self.prefetch_thread:
+            try:
+                self.prefetch_queue.put_nowait(None)  # 停止信號
+                self.prefetch_thread.join(timeout=1.0)
+            except:
+                pass
         self.cap.release()
-
+    
+    def __del__(self):
+        """釋放資源"""
+        self.stop()
+    
     def clear(self):
-        """Clear all cached frames."""
-        self.cache.clear()
+        """清空快取"""
+        with self.lock:
+            self.cache.clear()
+            self.frame_queue.clear()
+            self.decode_position = 0
