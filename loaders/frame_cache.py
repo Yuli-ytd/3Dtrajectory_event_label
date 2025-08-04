@@ -39,8 +39,16 @@ class FrameCache:
         
         # 預取執行緒
         self.prefetch_thread = None
-        self.prefetch_queue = queue.Queue()
+        self.prefetch_queue = queue.Queue(maxsize=50)  # 限制佇列大小
         self.start_prefetch_thread()
+        
+        # 防抖機制
+        self.last_request_time = 0
+        self.request_debounce_ms = 50  # 50ms 防抖
+        
+        # 載入狀態追蹤
+        self.loading_frames = set()  # 正在載入的幀
+        self.loading_lock = threading.Lock()
         
         # 初始化快取
         self._load_initial_cache()
@@ -59,13 +67,32 @@ class FrameCache:
                 if target_frame is None:  # 停止信號
                     break
                 
-                # 預取目標幀附近的幀
-                self._prefetch_frames_around(target_frame)
+                # 檢查是否已經在快取中
+                if target_frame in self.cache:
+                    continue
+                
+                # 檢查是否正在載入
+                with self.loading_lock:
+                    if target_frame in self.loading_frames:
+                        continue
+                    self.loading_frames.add(target_frame)
+                
+                try:
+                    # 預取目標幀附近的幀
+                    self._prefetch_frames_around(target_frame)
+                finally:
+                    # 清理載入狀態
+                    with self.loading_lock:
+                        self.loading_frames.discard(target_frame)
                 
             except queue.Empty:
                 continue
             except Exception as e:
                 print(f"預取執行緒錯誤：{e}")
+                # 清理載入狀態
+                with self.loading_lock:
+                    if 'target_frame' in locals():
+                        self.loading_frames.discard(target_frame)
     
     def _prefetch_frames_around(self, center_frame: int):
         """預取中心幀附近的幀"""
@@ -197,6 +224,18 @@ class FrameCache:
             # 佇列滿了，直接載入
             self._sequential_load_frames([frame_idx])
     
+    def _ensure_frame_in_cache_nonblocking(self, frame_idx: int):
+        """非阻塞地確保指定幀在快取中"""
+        if frame_idx in self.cache:
+            return
+        
+        # 將預取請求加入佇列
+        try:
+            self.prefetch_queue.put_nowait(frame_idx)
+        except queue.Full:
+            # 佇列滿了，直接載入
+            self._sequential_load_frames([frame_idx])
+    
     def _cleanup_cache(self):
         """清理過期的快取，保持記憶體使用在合理範圍"""
         if len(self.cache) <= self.max_cache_size:
@@ -207,11 +246,18 @@ class FrameCache:
         window_start = max(0, center - self.cache_window_frames // 2)
         window_end = min(self.total_frames, center + self.cache_window_frames // 2)
         
-        # 移除視窗外的幀
+        # 移除視窗外的幀，但保留一些緩衝
+        buffer_size = 50  # 保留額外的緩衝幀
         keys_to_remove = []
         for frame_idx in self.cache.keys():
-            if frame_idx < window_start or frame_idx >= window_end:
+            # 保留視窗內的幀和一些緩衝幀
+            if (frame_idx < window_start - buffer_size or 
+                frame_idx >= window_end + buffer_size):
                 keys_to_remove.append(frame_idx)
+        
+        # 限制每次清理的數量，避免過度清理
+        if len(keys_to_remove) > 100:
+            keys_to_remove = keys_to_remove[:100]
         
         for key in keys_to_remove:
             del self.cache[key]
@@ -224,19 +270,60 @@ class FrameCache:
         if frame_idx < 0 or frame_idx >= self.total_frames:
             raise IndexError(f"幀索引 {frame_idx} 超出範圍 [0, {self.total_frames})")
         
+        # 防抖機制：避免過於頻繁的請求
+        current_time = time.time() * 1000
+        if current_time - self.last_request_time < self.request_debounce_ms:
+            # 如果請求太頻繁，直接返回快取中的幀（如果存在）
+            if frame_idx in self.cache:
+                return self.cache[frame_idx]
+            # 否則等待一小段時間
+            time.sleep(0.01)
+        
+        self.last_request_time = current_time
+        
         with self.lock:
             self.current_frame = frame_idx
             
-            # 確保幀在快取中
-            self._ensure_frame_in_cache(frame_idx)
+            # 如果幀已經在快取中，直接返回
+            if frame_idx in self.cache:
+                return self.cache[frame_idx]
+            
+            # 檢查是否正在載入
+            with self.loading_lock:
+                if frame_idx in self.loading_frames:
+                    # 等待載入完成
+                    max_wait = 1.0  # 增加等待時間到1秒
+                    start_time = time.time()
+                    while frame_idx in self.loading_frames:
+                        if time.time() - start_time > max_wait:
+                            # 超時，嘗試直接載入
+                            break
+                        time.sleep(0.01)
+                    
+                    # 再次檢查快取
+                    if frame_idx in self.cache:
+                        return self.cache[frame_idx]
+                
+                # 標記為正在載入
+                self.loading_frames.add(frame_idx)
+            
+            # 確保幀在快取中（非阻塞）
+            self._ensure_frame_in_cache_nonblocking(frame_idx)
             
             # 等待幀載入完成
-            max_wait = 0.5  # 最大等待時間
+            max_wait = 1.0  # 增加等待時間
             start_time = time.time()
             while frame_idx not in self.cache:
                 if time.time() - start_time > max_wait:
+                    # 超時處理：返回空白幀或拋出異常
+                    with self.loading_lock:
+                        self.loading_frames.discard(frame_idx)
                     raise IndexError(f"載入幀 {frame_idx} 超時")
                 time.sleep(0.01)
+            
+            # 清理載入狀態
+            with self.loading_lock:
+                self.loading_frames.discard(frame_idx)
             
             # 返回幀
             return self.cache[frame_idx]
@@ -263,8 +350,27 @@ class FrameCache:
                 'current_frame': self.current_frame,
                 'total_frames': self.total_frames,
                 'decode_position': self.decode_position,
-                'queue_size': len(self.frame_queue)
+                'queue_size': len(self.frame_queue),
+                'loading_frames': len(self.loading_frames),
+                'prefetch_queue_size': self.prefetch_queue.qsize()
             }
+    
+    def optimize_cache(self):
+        """優化快取性能"""
+        with self.lock:
+            # 檢查快取大小
+            if len(self.cache) > self.max_cache_size * 0.8:
+                # 如果快取接近滿載，進行清理
+                self._cleanup_cache()
+            
+            # 檢查預取佇列大小
+            if self.prefetch_queue.qsize() > 40:
+                # 如果預取佇列太滿，清空一些請求
+                try:
+                    for _ in range(20):
+                        self.prefetch_queue.get_nowait()
+                except queue.Empty:
+                    pass
     
     def stop(self):
         """停止快取系統"""

@@ -34,6 +34,11 @@ class PlaybackController:
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.play_next_frame)
+        
+        # 快取優化計時器
+        self.cache_optimization_timer = QTimer()
+        self.cache_optimization_timer.timeout.connect(self._optimize_caches)
+        self.cache_optimization_timer.start(5000)  # 每5秒優化一次
 
         # create annotation controller
         self.annot = AnnotationController(output_dir, self.info.synced_groups[0][0])
@@ -118,6 +123,8 @@ class PlaybackController:
         try:
             ref_time, group = self.info.synced_groups[self.info.frame_idx]
             matches = []
+            render_errors = []
+            
             for cam_id, idx in enumerate(group):
                 panel = self.panels[cam_id]
                 if idx is None:
@@ -126,19 +133,35 @@ class PlaybackController:
                     continue
                 
                 else:
-                    pix = self._render_frame(cam_id, idx)
-                    panel.set_pixmap(pix)
-                    ts = self.info.timestamps[cam_id][idx]
-                    matches.append(f"{ts:.3f}")
+                    try:
+                        pix = self._render_frame(cam_id, idx)
+                        panel.set_pixmap(pix)
+                        ts = self.info.timestamps[cam_id][idx]
+                        matches.append(f"{ts:.3f}")
+                    except Exception as e:
+                        # 記錄渲染錯誤但不中斷整個更新
+                        error_msg = f"Camera {cam_id} frame {idx}: {str(e)}"
+                        render_errors.append(error_msg)
+                        print(f"渲染錯誤：{error_msg}")
+                        
+                        # 顯示錯誤幀（黑色背景）
+                        pix = QPixmap(panel.width(), panel.height())
+                        pix.fill(Qt.black)
+                        panel.set_pixmap(pix)
+                        matches.append("Error")
             
-            self.status_label.setText(f"Frame: {self.info.frame_idx} | Ref Time: {ref_time:.3f} | Matched: {matches}")
-            # self.status_label.setText(f"Frame: {self.info.frame_idx} | Ref Time: {ref_time:.3f}")
+            # 更新狀態標籤
+            if render_errors:
+                self.status_label.setText(f"Frame: {self.info.frame_idx} | Ref Time: {ref_time:.3f} | Errors: {len(render_errors)}")
+            else:
+                self.status_label.setText(f"Frame: {self.info.frame_idx} | Ref Time: {ref_time:.3f} | Matched: {matches}")
+            
             self.slider.blockSignals(True)
             self.slider.setValue(self.info.frame_idx)
             self.slider.blockSignals(False)
 
-            # 智能預取：在更新幀後觸發預取
-            self._trigger_prefetch()
+            # 智能預取：在更新幀後觸發預取（非阻塞）
+            self._trigger_prefetch_async()
             
             # end_ts = time.perf_counter()
             # elapsed = (end_ts - start_ts) * 1000  # Convert to milliseconds
@@ -150,13 +173,26 @@ class PlaybackController:
         
         self.is_updating = False
     
+    def _trigger_prefetch_async(self):
+        """非阻塞觸發智能預取"""
+        try:
+            # 使用執行緒池或異步方式觸發預取
+            import threading
+            prefetch_thread = threading.Thread(target=self._trigger_prefetch, daemon=True)
+            prefetch_thread.start()
+        except Exception as e:
+            print(f"預取觸發錯誤：{e}")
+
     def _trigger_prefetch(self):
         """觸發智能預取"""
         try:
             # 預取目前幀附近的幀
             for fc in self.info.frames:
                 if fc:
-                    fc.prefetch_around_current()
+                    try:
+                        fc.prefetch_around_current()
+                    except Exception as e:
+                        print(f"預取目前幀時發生錯誤：{e}")
             
             # 如果正在播放，預取下一批幀
             if self.info.playing:
@@ -229,9 +265,19 @@ class PlaybackController:
     def cleanup(self):
         """Release resources and save annotations."""
         self.timer.stop()
+        self.cache_optimization_timer.stop()
         for fc in self.info.frames:
             if fc:
                 # fc.clear()
                 # fc.__del__()
                 fc.stop()
+
+    def _optimize_caches(self):
+        """定期優化所有快取"""
+        try:
+            for fc in self.info.frames:
+                if fc:
+                    fc.optimize_cache()
+        except Exception as e:
+            print(f"快取優化錯誤：{e}")
 
