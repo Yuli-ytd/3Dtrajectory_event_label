@@ -231,6 +231,7 @@ class AnnotationController:
     def save_annotations(self, end_timestamp: float):
         print("Saving annotations...")
         print(f"Current segments: {self.current}")
+        reopen: Optional[Dict] = None
         if self.current and (self.current["description"] or self.current["phase"] == "rest"):
             try:
                 # If there's an open segment, close it
@@ -239,12 +240,17 @@ class AnnotationController:
             except IndexError:
                 self.current["time_interval"][1] = end_timestamp
             self.segments.append(self.current)
+            if self.current["phase"] == "rest" or self.current["description"][-1]["event_type"] != "dead":
+                reopen = self.current
             self.current = None
 
         elif self.segments and self.segments[-1]["time_interval"][1] is None:
             # If the last segment is open, close it with the end timestamp
             self.segments[-1]["time_interval"][1] = end_timestamp
-        
+            last = self.segments[-1]
+            if last["phase"] == "rest" or (last.get("description") and last["description"][-1]["event_type"] != "dead"):
+                reopen = last
+
         elif self.segments and self.segments[-1]["phase"] == "rally":
             new_segment = {
                 "phase": "rest",
@@ -255,3 +261,7 @@ class AnnotationController:
 
         with open(self.output_path, 'w', encoding='utf-8') as f:
             json.dump(self.segments, f, ensure_ascii=False, indent=2)
+
+        if reopen:
+            self.current = self.segments.pop()
+            self.current["time_interval"][1] = None
