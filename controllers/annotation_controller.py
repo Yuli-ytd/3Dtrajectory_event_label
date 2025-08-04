@@ -26,8 +26,20 @@ class AnnotationController:
                     fid = event["fid"]
                     self.by_frame.setdefault(fid, []).append(event)
             print(f"Segments: {self.segments}")
-            self.current =  None
-        
+            self.current = None
+            if self.segments:
+                last = self.segments[-1]
+                if (
+                    last["phase"] == "rest"
+                    or (
+                        last["phase"] == "rally"
+                        and last.get("description")
+                        and last["description"][-1]["event_type"] != "dead"
+                    )
+                ):
+                    self.current = self.segments.pop()
+                    self.current["time_interval"][1] = None
+
         else:
             # Start the first segment as phase "rest", the time range starts at the first frame's timestamp
             self.current = {
@@ -86,7 +98,7 @@ class AnnotationController:
             return start<=ts and (end is None or ts<=end)
 
         else:  # rally
-            return end is not None and start<=ts<=end and segment["description"][-1]["event_type"]!="dead"
+            return end is not None and start<=ts<=end
         
     def on_phase_switch(self, new_phase: Optional[str], timestamp: float):
         
