@@ -361,6 +361,9 @@ class MainWindow(QMainWindow):
                 new_fid = self.control.info.max_frames - 1
             self.control.info.frame_idx = new_fid
             self.slider.setValue(new_fid)
+            
+            # 觸發精確幀載入（與滑桿釋放邏輯一致）
+            self._trigger_precise_frame_loading(new_fid)
     
         elif k == Qt.Key_Down and self.control.info.frame_idx > 0:
             if self.control.info.frame_idx - 30 > 0:
@@ -369,10 +372,27 @@ class MainWindow(QMainWindow):
                 new_fid = 0
             self.control.info.frame_idx = new_fid
             self.slider.setValue(new_fid)
-
+            
+            # 觸發精確幀載入（與滑桿釋放邏輯一致）
+            self._trigger_precise_frame_loading(new_fid)
 
         else:
             super().keyPressEvent(event)
+
+    def _trigger_precise_frame_loading(self, fid: int):
+        """觸發精確幀載入（與滑桿釋放邏輯一致）"""
+        if not self.control:
+            return
+        
+        # 對每支 camera 的 cache 都叫一次 __getitem__，啟動精確 random access
+        for cache in self.control.info.frames:
+            try:
+                _ = cache[fid]
+            except Exception as e:
+                print(f"載入幀 {fid} 時發生錯誤：{e}")
+        
+        # 最後一次性更新畫面
+        self.control.update_frames()
 
     def closeEvent(self, event):
         """Handle window close event to release resources."""

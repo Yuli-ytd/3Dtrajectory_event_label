@@ -92,6 +92,20 @@ class FrameCache:
         # 排序幀索引以優化載入
         frame_indices.sort()
         
+        # 檢查是否需要重新開始解碼（向後跳轉的情況）
+        min_target = min(frame_indices)
+        if min_target < self.decode_position:
+            # 向後跳轉，需要重新開始
+            new_cap = cv2.VideoCapture(self.video_path)
+            if not new_cap.isOpened():
+                raise RuntimeError("無法重新開啟影片檔案")
+            
+            # 釋放舊的並替換
+            self.cap.release()
+            self.cap = new_cap
+            self.decode_position = 0
+            self.frame_queue.clear()
+        
         # 找到最接近目前解碼位置的起始點
         start_idx = min(frame_indices, key=lambda x: abs(x - self.decode_position))
         
@@ -132,60 +146,6 @@ class FrameCache:
         
         if frames_loaded > 0:
             print(f"預取載入 {frames_loaded} 幀")
-    
-    def _load_frame_direct(self, frame_idx: int):
-        """直接載入單一幀（用於向後跳轉）"""
-        if frame_idx in self.cache:
-            return
-        
-        # 如果目標幀在目前解碼位置之前，需要重新開始
-        if frame_idx < self.decode_position:
-            # 創建新的VideoCapture物件
-            new_cap = cv2.VideoCapture(self.video_path)
-            if not new_cap.isOpened():
-                raise RuntimeError("無法重新開啟影片檔案")
-            
-            # 釋放舊的並替換
-            self.cap.release()
-            self.cap = new_cap
-            self.decode_position = 0
-            self.frame_queue.clear()
-        
-        # 順序解碼到目標幀
-        while self.decode_position <= frame_idx:
-            ret, frame = self.cap.read()
-            if not ret:
-                break
-            
-            # 將幀加入快取
-            self.cache[self.decode_position] = frame.copy()
-            self.decode_position += 1
-    
-    def _load_frame_simple(self, frame_idx: int):
-        """簡單載入單一幀（避免記憶體問題）"""
-        if frame_idx in self.cache:
-            return
-        
-        # 創建臨時的VideoCapture物件
-        temp_cap = cv2.VideoCapture(self.video_path)
-        if not temp_cap.isOpened():
-            raise RuntimeError("無法開啟影片檔案")
-        
-        # 順序解碼到目標幀
-        current_pos = 0
-        while current_pos <= frame_idx:
-            ret, frame = temp_cap.read()
-            if not ret:
-                break
-            
-            # 只將目標幀加入快取
-            if current_pos == frame_idx:
-                self.cache[frame_idx] = frame.copy()
-                break
-            
-            current_pos += 1
-        
-        temp_cap.release()
     
     def _seek_to_frame_sequential(self, target_frame: int):
         """順序定位到指定幀（不使用set）"""
@@ -229,16 +189,13 @@ class FrameCache:
         if frame_idx in self.cache:
             return
         
-        # 如果幀在目前解碼位置之前，使用簡單載入（避免記憶體問題）
-        if frame_idx < self.decode_position:
-            self._load_frame_simple(frame_idx)
-        else:
-            # 將預取請求加入佇列
-            try:
-                self.prefetch_queue.put_nowait(frame_idx)
-            except queue.Full:
-                # 佇列滿了，直接載入
-                self._sequential_load_frames([frame_idx])
+        # 統一使用順序載入邏輯，不再區分前向和後向
+        # 將預取請求加入佇列
+        try:
+            self.prefetch_queue.put_nowait(frame_idx)
+        except queue.Full:
+            # 佇列滿了，直接載入
+            self._sequential_load_frames([frame_idx])
     
     def _cleanup_cache(self):
         """清理過期的快取，保持記憶體使用在合理範圍"""
@@ -288,7 +245,13 @@ class FrameCache:
         """預取目前幀附近的幀"""
         if self.prefetch_queue.empty():
             try:
-                self.prefetch_queue.put_nowait(self.current_frame)
+                # 預取目前幀附近的幀，包括前後的幀
+                center_frame = self.current_frame
+                window_start = max(0, center_frame - self.cache_window_frames // 2)
+                window_end = min(self.total_frames, center_frame + self.cache_window_frames // 2)
+                
+                # 將預取請求加入佇列
+                self.prefetch_queue.put_nowait(center_frame)
             except queue.Full:
                 pass
     

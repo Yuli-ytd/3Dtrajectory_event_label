@@ -173,6 +173,21 @@ class PlaybackController:
                             fc.prefetch_queue.put_nowait(next_frames[0])
                         except queue.Full:
                             pass
+            
+            # 預取向後的幀（用於向後導航）
+            prev_frames = []
+            for i in range(1, 16):  # 預取前面15幀
+                prev_frame = self.info.frame_idx - i
+                if prev_frame >= 0:
+                    prev_frames.append(prev_frame)
+            
+            # 觸發向後預取
+            for fc in self.info.frames:
+                if fc and prev_frames:
+                    try:
+                        fc.prefetch_queue.put_nowait(prev_frames[0])
+                    except queue.Full:
+                        pass
         except Exception as e:
             print(f"預取觸發錯誤：{e}")
     
