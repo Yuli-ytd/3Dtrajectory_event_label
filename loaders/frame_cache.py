@@ -94,22 +94,21 @@ class FrameCache:
                     if 'target_frame' in locals():
                         self.loading_frames.discard(target_frame)
     
-    def _prefetch_frames_around(self, center_frame: int):
-        """預取中心幀附近的幀"""
+    def _prefetch_frames_around(self, center_frame: int, batch_size: int = 30):
+        """分批預取中心幀附近的幀，優先載入目標幀，降低單次 I/O 負擔"""
         window_start = max(0, center_frame - self.cache_window_frames // 2)
         window_end = min(self.total_frames, center_frame + self.cache_window_frames // 2)
-        
-        # 檢查哪些幀需要載入
-        frames_to_load = []
-        for frame_idx in range(window_start, window_end):
-            if frame_idx not in self.cache:
-                frames_to_load.append(frame_idx)
-        
+        frames_to_load = [i for i in range(window_start, window_end) if i not in self.cache]
         if not frames_to_load:
             return
-        
-        # 順序載入幀
-        self._sequential_load_frames(frames_to_load)
+        # 目標幀優先
+        if center_frame in frames_to_load:
+            frames_to_load.remove(center_frame)
+            frames_to_load = [center_frame] + frames_to_load
+        # 分批載入
+        for i in range(0, len(frames_to_load), batch_size):
+            batch = frames_to_load[i:i+batch_size]
+            self._sequential_load_frames(batch)
     
     def _sequential_load_frames(self, frame_indices: list):
         """順序載入指定的幀"""

@@ -16,6 +16,7 @@ class AllCamerasInfo:
     frame_idx: int
     rotation_angles: list
     playing: bool
+    sliding: bool
     brightness_factor: float
 
 
@@ -85,6 +86,7 @@ def load_all_cameras_data(files_path: str, syc_tol: float = 0.004166) -> AllCame
     max_frames = len(synced_groups)
     rotation_angles = [0] * num_cams
     playing = False
+    sliding = False
     brightness_factor = 1.0
 
     return AllCamerasInfo(
@@ -98,5 +100,6 @@ def load_all_cameras_data(files_path: str, syc_tol: float = 0.004166) -> AllCame
         frame_idx=0,
         rotation_angles=rotation_angles,
         playing=playing,
+        sliding=sliding,
         brightness_factor=brightness_factor
     )

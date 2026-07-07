@@ -165,9 +165,9 @@ class MainWindow(QMainWindow):
                 }
                 """
             )
-            # self.slider.valueChanged.connect(self._on_slider_value_changed)
-            # self.slider.sliderReleased.connect(self._on_slider_released)
-            self.slider.valueChanged.connect(self._on_frame_changed)
+            self.slider.valueChanged.connect(self._on_slider_value_changed)
+            self.slider.sliderReleased.connect(self._on_slider_released)
+            # self.slider.valueChanged.connect(self._on_frame_changed)
 
 
             self.play_button = QPushButton("Play")
@@ -353,11 +353,10 @@ class MainWindow(QMainWindow):
             print(f"處理幀變更時發生錯誤：{e}")
 
     def _on_slider_value_changed(self, value: int):
-        """拖動過程中只更新 frame_idx，不做任何 redraw。"""
+        """拖動過程中只更新 frame_idx，不即時載入畫面。"""
         try:
             if not self.control:
                 return
-            # 只改位置，不呼叫 update_frames()
             self.control.info.frame_idx = value
         except Exception as e:
             print(f"處理滑桿值變更時發生錯誤：{e}")

@@ -113,7 +113,7 @@ class VideoSyncViewer(QMainWindow):
         """Read metadata, load frames, and synchronize across cameras."""
         meta_files = [f for f in os.listdir(folder_path)
                       if f.startswith('CameraReader_') and f.endswith('_meta.csv')]
-        self.cam_ids = sorted(int(f.split('_')[1]) for f in meta_files)[:4]
+        self.cam_ids = sorted(int(f.split('_')[1]) for f in meta_files)[:2]
         self.num_cams = len(self.cam_ids)
 
         self.meta = []
@@ -132,14 +132,19 @@ class VideoSyncViewer(QMainWindow):
             df = pd.read_csv(os.path.join(folder_path, f"CameraReader_{cam_id}_meta.csv"))
             self.meta.append(df)
             cap = cv2.VideoCapture(os.path.join(folder_path, f"CameraReader_{cam_id}.mp4"))
+            playCapture = cap.opened()
+            getfps = cap.get(cv2.CAP_PROP_FPS)
             self.vcaps.append(cap)
             total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            for _ in tqdm(range(total), desc=f"Cam{cam_id}", leave=False):
+            for i in tqdm(range(total), desc=f"Cam{cam_id}", leave=False):
                 ret, frame = cap.read()
+                playCapture.set(cv2.CAP_PROP_POS_FRAMES, i)
+                pret, pframe = playCapture.read()                
+
                 if not ret:
                     break
                 self.frame_buffers[i].append(frame)
-            self.timestamps_list.append(df['timestamp'].tolist())
+            self.timestamps_list.append(df['timestamp'].tolist())            
             track_path = os.path.join(folder_path, f"TrackNet_{cam_id}.csv")
             td = pd.read_csv(track_path).set_index('Frame') if os.path.exists(track_path) else None
             self.track_data.append(td)

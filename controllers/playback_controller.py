@@ -44,7 +44,7 @@ class PlaybackController:
         self.annot = AnnotationController(output_dir, self.info.synced_groups[0][0])
         
         # ui event connections
-        # self.slider.valueChanged.connect(self.on_slider_changed)
+        self.slider.valueChanged.connect(self.on_slider_changed)
         self.play_button.clicked.connect(self.toggle_playback)
 
     def _render_frame(self, cam_id: int, idx: int) -> QPixmap:
@@ -62,7 +62,7 @@ class PlaybackController:
                                   270: cv2.ROTATE_90_COUNTERCLOCKWISE}
                 frame = cv2.rotate(frame, rotate_control[ang])
 
-            if not self.info.playing:
+            if not self.info.playing and not self.info.sliding:
                 
                 # Show TrackNet points if enabled    
                 if self.show_tracknet:
@@ -229,7 +229,9 @@ class PlaybackController:
     
     def on_slider_changed(self, value: int):
         self.info.frame_idx = value
+        self.info.sliding = self.slider.isSliderDown()
         self.update_frames()
+        self.info.sliding = False    
     
     def toggle_playback(self):
         if self.info.playing:

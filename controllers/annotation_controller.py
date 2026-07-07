@@ -25,7 +25,7 @@ class AnnotationController:
                 for event in segment.get("description", []):
                     fid = event["fid"]
                     self.by_frame.setdefault(fid, []).append(event)
-            print(f"Segments: {self.segments}")
+            # print(f"Segments: {self.segments}")
             self.current = None
             if self.segments:
                 last = self.segments[-1]
