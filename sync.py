@@ -144,7 +144,7 @@ class VideoSyncViewer(QMainWindow):
                 if not ret:
                     break
                 self.frame_buffers[i].append(frame)
-            self.timestamps_list.append(df['timestamp'].tolist())            
+            self.timestamps_list.append(df['monotonic_timestamp'].tolist())            
             track_path = os.path.join(folder_path, f"TrackNet_{cam_id}.csv")
             td = pd.read_csv(track_path).set_index('Frame') if os.path.exists(track_path) else None
             self.track_data.append(td)

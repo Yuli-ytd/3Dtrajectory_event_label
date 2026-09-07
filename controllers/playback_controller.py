@@ -6,8 +6,7 @@ from .annotation_controller import AnnotationController
 from ui.camera_panel import CameraPanel
 # from .prefetch_thread import PrefetchThread
 import cv2
-import time
-import queue
+from typing import Callable, Optional
 
 class PlaybackController:
     def __init__(self, 
@@ -16,7 +15,8 @@ class PlaybackController:
                  status_label: QLabel,
                  slider: QSlider,
                  play_button: QPushButton,
-                 output_dir: str):
+                 output_dir: str,
+                 frame_changed_callback: Optional[Callable[[int], None]] = None):
         
         self.info = cameras_info
         for fc in self.info.frames:
@@ -31,9 +31,14 @@ class PlaybackController:
         self.is_updating = False
         self.show_tracknet = True
         self.output_dir = output_dir
+        self.frame_changed_callback = frame_changed_callback
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.play_next_frame)
+
+        self.cache_refresh_timer = QTimer()
+        self.cache_refresh_timer.setSingleShot(True)
+        self.cache_refresh_timer.timeout.connect(self._refresh_pending_frame)
         
         # 快取優化計時器
         self.cache_optimization_timer = QTimer()
@@ -52,6 +57,8 @@ class PlaybackController:
         try:
             # Get the frame and apply brightness adjustment
             frame = self.info.frames[cam_id][idx]
+            if frame is None:
+                raise ValueError(f"Camera {cam_id} frame {idx} could not be decoded")
             frame = cv2.convertScaleAbs(frame, alpha = self.info.brightness_factor, beta = 0)
             
             # Rotate the frame if necessary
@@ -103,7 +110,10 @@ class PlaybackController:
  
     def play_next_frame(self):
         if self.info.frame_idx < self.info.max_frames - 1:
-            self.info.frame_idx += 1
+            next_fid = self.info.frame_idx + 1
+            if not self._request_synced_frame(next_fid):
+                return
+            self.info.frame_idx = next_fid
             self.update_frames()
         else:
             self.timer.stop()
@@ -160,8 +170,17 @@ class PlaybackController:
             self.slider.setValue(self.info.frame_idx)
             self.slider.blockSignals(False)
 
+            # Keep frame-dependent UI (for example, event buttons) in sync even
+            # when slider signals are blocked during playback/rendering.
+            if self.frame_changed_callback:
+                self.frame_changed_callback(self.info.frame_idx)
+
             # 智能預取：在更新幀後觸發預取（非阻塞）
             self._trigger_prefetch_async()
+
+            if (not self.info.playing and
+                    not self._synced_frame_is_cached(self.info.frame_idx)):
+                self.cache_refresh_timer.start(50)
             
             # end_ts = time.perf_counter()
             # elapsed = (end_ts - start_ts) * 1000  # Convert to milliseconds
@@ -177,60 +196,64 @@ class PlaybackController:
         """非阻塞觸發智能預取"""
         try:
             # 使用執行緒池或異步方式觸發預取
-            import threading
-            prefetch_thread = threading.Thread(target=self._trigger_prefetch, daemon=True)
-            prefetch_thread.start()
+            # FrameCache already owns a background worker. These are only
+            # non-blocking queue operations, so a thread per frame is wasteful.
+            self._trigger_prefetch()
         except Exception as e:
             print(f"預取觸發錯誤：{e}")
 
     def _trigger_prefetch(self):
-        """觸發智能預取"""
-        try:
-            # 預取目前幀附近的幀
-            for fc in self.info.frames:
-                if fc:
-                    try:
-                        fc.prefetch_around_current()
-                    except Exception as e:
-                        print(f"預取目前幀時發生錯誤：{e}")
-            
-            # 如果正在播放，預取下一批幀
-            if self.info.playing:
-                next_frames = []
-                for i in range(1, 31):  # 預取接下來30幀
-                    next_frame = self.info.frame_idx + i
-                    if next_frame < self.info.max_frames:
-                        next_frames.append(next_frame)
-                
-                # 觸發預取
-                for fc in self.info.frames:
-                    if fc and next_frames:
-                        try:
-                            fc.prefetch_queue.put_nowait(next_frames[0])
-                        except queue.Full:
-                            pass
-            
-            # 預取向後的幀（用於向後導航）
-            prev_frames = []
-            for i in range(1, 16):  # 預取前面15幀
-                prev_frame = self.info.frame_idx - i
-                if prev_frame >= 0:
-                    prev_frames.append(prev_frame)
-            
-            # 觸發向後預取
-            for fc in self.info.frames:
-                if fc and prev_frames:
-                    try:
-                        fc.prefetch_queue.put_nowait(prev_frames[0])
-                    except queue.Full:
-                        pass
-        except Exception as e:
-            print(f"預取觸發錯誤：{e}")
-    
+        """Ask each cache's existing worker to extend its forward buffer."""
+        for frame_cache in self.info.frames:
+            if frame_cache:
+                frame_cache.prefetch_around_current()
+
+    def _synced_frame_is_cached(self, fid: int) -> bool:
+        if fid < 0 or fid >= self.info.max_frames:
+            return False
+        _, group = self.info.synced_groups[fid]
+        return all(
+            idx is None or self.info.frames[cam_id].is_cached(idx)
+            for cam_id, idx in enumerate(group)
+        )
+
+    def _request_synced_frame(self, fid: int, urgent: bool = False) -> bool:
+        if fid < 0 or fid >= self.info.max_frames:
+            return False
+        _, group = self.info.synced_groups[fid]
+        ready = True
+        for cam_id, idx in enumerate(group):
+            if idx is None:
+                continue
+            frame_cache = self.info.frames[cam_id]
+            if not frame_cache.is_cached(idx):
+                frame_cache.request_frame(idx, urgent=urgent)
+                ready = False
+        return ready
+
+    def seek_frame(self, fid: int):
+        """Start an exact background jump and return to Qt immediately."""
+        if fid < 0 or fid >= self.info.max_frames:
+            return
+        self.info.frame_idx = fid
+        if not self._synced_frame_is_cached(fid):
+            self._request_synced_frame(fid, urgent=True)
+        self.update_frames()
+        if not self._synced_frame_is_cached(fid):
+            self.cache_refresh_timer.start(50)
+
+    def _refresh_pending_frame(self):
+        fid = self.info.frame_idx
+        self.update_frames()
+        if (not self.info.playing and
+                not self._synced_frame_is_cached(fid)):
+            self.cache_refresh_timer.start(50)
+
     def on_slider_changed(self, value: int):
         self.info.frame_idx = value
         self.info.sliding = self.slider.isSliderDown()
-        self.update_frames()
+        if not self.info.sliding:
+            self.seek_frame(value)
         self.info.sliding = False    
     
     def toggle_playback(self):
@@ -240,6 +263,7 @@ class PlaybackController:
             self.play_button.setText("Play")
             self.info.playing = False
         else:
+            self._request_synced_frame(self.info.frame_idx + 1)
             self.timer.start(9)
             self.play_button.setText("Pause")
             self.info.playing = True
@@ -268,6 +292,7 @@ class PlaybackController:
         """Release resources and save annotations."""
         self.timer.stop()
         self.cache_optimization_timer.stop()
+        self.cache_refresh_timer.stop()
         for fc in self.info.frames:
             if fc:
                 # fc.clear()

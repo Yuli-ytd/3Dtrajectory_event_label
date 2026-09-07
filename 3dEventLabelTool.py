@@ -4,7 +4,7 @@ from ui.main_window import MainWindow
 
 def main():
     app = QApplication(sys.argv)
-    window = MainWindow(base_dir="./Data", sync_tol=0.004166)
+    window = MainWindow(base_dir="./Data", sync_tol=0.0045)
     window.show()
     sys.exit(app.exec_())
 

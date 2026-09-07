@@ -109,7 +109,8 @@ class MainWindow(QMainWindow):
                 panels=self.panels,
                 slider=self.slider,
                 play_button=self.play_button,
-                output_dir=folder_path
+                output_dir=folder_path,
+                frame_changed_callback=self._on_frame_changed
             )
 
             # Connect toolbar actions to the playback controller
@@ -347,8 +348,6 @@ class MainWindow(QMainWindow):
                 # Update the allowed events for the next frame        
                 self.current_allowed_btn = allowed
             
-            self.control.update_frames()
-            
         except Exception as e:
             print(f"處理幀變更時發生錯誤：{e}")
 
@@ -362,24 +361,13 @@ class MainWindow(QMainWindow):
             print(f"處理滑桿值變更時發生錯誤：{e}")
 
     def _on_slider_released(self):
-        """滑桿放手後，呼叫一次 __getitem__ 觸發精準 random access，然後 update_frames()。"""
+        """Queue an exact background jump without blocking the UI thread."""
         try:
-            if not self.control:
-                return
-            fid = self.control.info.frame_idx
-
-            # 對每支 camera 的 cache 都叫一次 __getitem__，啟動我們加強版 random_access
-            for cache in self.control.info.frames:
-                try:
-                    _ = cache[fid]
-                except Exception as e:
-                    print(f"載入幀 {fid} 時發生錯誤：{e}")
-
-            # 最後一次性更新畫面
-            self.control.update_frames()
+            if self.control:
+                self.control.seek_frame(self.control.info.frame_idx)
         except Exception as e:
-            print(f"處理滑桿釋放時發生錯誤：{e}")
-    
+            print(f"處理滑桿跳轉時發生錯誤：{e}")
+
     def resizeEvent(self, event):
         """Ensure frames redraw on window resize."""
         try:
@@ -390,26 +378,14 @@ class MainWindow(QMainWindow):
             print(f"處理視窗大小變更時發生錯誤：{e}")
 
     def _process_pending_frame_update(self):
-        """處理待處理的幀更新"""
+        """Queue a debounced exact jump without decoding on the UI thread."""
         try:
-            if self.pending_frame_update and self.control:
-                try:
-                    fid = self.pending_frame_update
-                    self.pending_frame_update = None
-                    
-                    # 對每支 camera 的 cache 都叫一次 __getitem__，啟動精確 random access
-                    for cache in self.control.info.frames:
-                        try:
-                            _ = cache[fid]
-                        except Exception as e:
-                            print(f"載入幀 {fid} 時發生錯誤：{e}")
-                    
-                    # 最後一次性更新畫面
-                    self.control.update_frames()
-                except Exception as e:
-                    print(f"處理幀更新時發生錯誤：{e}")
+            if self.pending_frame_update is not None and self.control:
+                fid = self.pending_frame_update
+                self.pending_frame_update = None
+                self.control.seek_frame(fid)
         except Exception as e:
-            print(f"處理待處理幀更新時發生錯誤：{e}")
+            print(f"處理幀更新時發生錯誤：{e}")
 
     def keyPressEvent(self, event):
         """Handle key events for navigation and tracking toggle."""
@@ -498,4 +474,3 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"處理視窗關閉時發生錯誤：{e}")
             super().closeEvent(event)
-        
